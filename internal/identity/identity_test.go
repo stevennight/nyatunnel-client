@@ -2,8 +2,14 @@ package identity
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
 func TestSaveLoadRemove(t *testing.T) {
@@ -31,6 +37,36 @@ func TestSaveLoadRemove(t *testing.T) {
 	}
 	if _, err := Load(dir); !errors.Is(err, ErrNotEnrolled) {
 		t.Fatalf("after remove: %v", err)
+	}
+}
+
+func TestKeyringStorage(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	if err := SaveUser(dir, &Identity{Server: "https://t.example.com", DeviceID: "dev_k", PrivateKey: priv}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "identity.json"))
+	if strings.Contains(string(raw), base64.StdEncoding.EncodeToString(priv.Seed())) || !strings.Contains(string(raw), `"keyring"`) {
+		t.Fatalf("key leaked into the file: %s", raw)
+	}
+	got, err := Load(dir)
+	if err != nil || !got.PrivateKey.Equal(priv) {
+		t.Fatalf("load from keyring: %v", err)
+	}
+	if err := Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyring.Get(keyringService, "dev_k"); err == nil {
+		t.Fatal("keyring entry survived Remove")
+	}
+	keyring.MockInitWithError(errors.New("no keychain"))
+	if err := SaveUser(dir, &Identity{Server: "https://t.example.com", DeviceID: "dev_f", PrivateKey: priv}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(dir); err != nil || got.KeyStore != "" || !got.PrivateKey.Equal(priv) {
+		t.Fatalf("file fallback: %+v %v", got, err)
 	}
 }
 

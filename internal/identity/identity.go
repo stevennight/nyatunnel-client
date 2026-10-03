@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/stevennight/nyatunnel-common/deeplink"
+	"github.com/zalando/go-keyring"
 )
 
 // Identity is an enrolled device.
@@ -24,8 +25,14 @@ type Identity struct {
 	DeviceID   string             `json:"deviceId"`
 	DeviceName string             `json:"deviceName"`
 	PrivateKey ed25519.PrivateKey `json:"-"`
-	Key        string             `json:"privateKey"` // base64 seed, only in the file
+	Key        string             `json:"privateKey,omitempty"` // base64 seed when stored in the file
+	// KeyStore is "keyring" when the seed lives in the OS keychain, "" when it is in the file.
+	KeyStore string `json:"keyStore,omitempty"`
 }
+
+const keyringService = "NyaTunnel"
+
+func (id *Identity) keyringAccount() string { return id.DeviceID }
 
 // Host is the server host the device signs for.
 func (id *Identity) Host() (string, error) { return deeplink.ServerHost(id.Server) }
@@ -66,6 +73,13 @@ func Load(dir string) (*Identity, error) {
 	if err := json.Unmarshal(b, &id); err != nil {
 		return nil, fmt.Errorf("identity file is damaged: %w", err)
 	}
+	if id.KeyStore == "keyring" {
+		v, err := keyring.Get(keyringService, id.keyringAccount())
+		if err != nil {
+			return nil, fmt.Errorf("cannot read the device key from the system keychain: %w", err)
+		}
+		id.Key = v
+	}
 	seed, err := base64.StdEncoding.DecodeString(id.Key)
 	if err != nil || len(seed) != ed25519.SeedSize || id.DeviceID == "" || id.Server == "" {
 		return nil, errors.New("identity file is damaged")
@@ -74,12 +88,22 @@ func Load(dir string) (*Identity, error) {
 	return &id, nil
 }
 
-// Save writes the identity with owner-only permissions, replacing any previous one atomically.
-func Save(dir string, id *Identity) error {
+// Save writes the identity into a file with owner-only permissions (system services, servers).
+func Save(dir string, id *Identity) error { return save(dir, id, false) }
+
+// SaveUser prefers the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service)
+// for the private key and falls back to the file where there is none (headless Linux, Docker).
+func SaveUser(dir string, id *Identity) error { return save(dir, id, true) }
+
+func save(dir string, id *Identity, useKeyring bool) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	id.Key = base64.StdEncoding.EncodeToString(id.PrivateKey.Seed())
+	seed := base64.StdEncoding.EncodeToString(id.PrivateKey.Seed())
+	id.Key, id.KeyStore = seed, ""
+	if useKeyring && keyring.Set(keyringService, id.keyringAccount(), seed) == nil {
+		id.Key, id.KeyStore = "", "keyring"
+	}
 	b, err := json.MarshalIndent(id, "", "  ")
 	if err != nil {
 		return err
@@ -103,9 +127,15 @@ func Save(dir string, id *Identity) error {
 	return os.Rename(tmp.Name(), path(dir))
 }
 
-// Remove deletes the identity (logout or revoked).
+// Remove deletes the identity (logout or revoked), including a key in the keychain.
 func Remove(dir string) error {
 	_ = SaveDirect(dir, nil)
+	if b, err := os.ReadFile(path(dir)); err == nil {
+		var id Identity
+		if json.Unmarshal(b, &id) == nil && id.KeyStore == "keyring" {
+			_ = keyring.Delete(keyringService, id.keyringAccount())
+		}
+	}
 	err := os.Remove(path(dir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

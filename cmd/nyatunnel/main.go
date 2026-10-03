@@ -218,7 +218,7 @@ func cmdEnroll(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	id := &identity.Identity{Server: server, DeviceID: deviceID, DeviceName: deviceName, PrivateKey: priv}
-	if err := identity.Save(dir, id); err != nil {
+	if err := identity.SaveUser(dir, id); err != nil {
 		fmt.Fprintln(stderr, "注册成功，但保存密钥失败:", err)
 		return 1
 	}

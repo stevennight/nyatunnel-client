@@ -238,7 +238,7 @@ func (d *Daemon) Enroll(ctx context.Context, server, code, name string) error {
 		return err
 	}
 	id := &identity.Identity{Server: server, DeviceID: deviceID, DeviceName: name, PrivateKey: priv}
-	if err := identity.Save(d.Dir, id); err != nil {
+	if err := identity.SaveUser(d.Dir, id); err != nil {
 		return err
 	}
 	d.Log.Info("enrolled", "server", server, "device", deviceID)
