@@ -10,8 +10,8 @@ github.com/hashicorp/yamux v0.1.2 h1:XtB8kyFOyHXYVFnwT5C3+Bdo8gArse7j2AQ0DA0Uey8
 github.com/hashicorp/yamux v0.1.2/go.mod h1:C+zze2n6e/7wshOZep2A70/aQU6QBRWJO/G6FT1wIns=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/stevennight/nyatunnel-common v0.0.0-20261003172318-bd14ad4e9c9c h1:Pb1yVmyviPjwSC1iNds2QfeOJ9OtWOqrCtGcyL5updY=
-github.com/stevennight/nyatunnel-common v0.0.0-20261003172318-bd14ad4e9c9c/go.mod h1:xtn8oMgwUqvpvkAmDu0+mjMcgTEBdjdKuMjJcIPVnoM=
+github.com/stevennight/nyatunnel-common v0.1.0 h1:Ks6ksCyR92ATraH0olB+Inj8wuH8WHO09cTQZ9gKDyo=
+github.com/stevennight/nyatunnel-common v0.1.0/go.mod h1:xtn8oMgwUqvpvkAmDu0+mjMcgTEBdjdKuMjJcIPVnoM=
 github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
 github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
