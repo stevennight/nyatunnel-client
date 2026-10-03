@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -28,6 +29,7 @@ import (
 	"nyatunnel-client/internal/enroll"
 	"nyatunnel-client/internal/identity"
 	"nyatunnel-client/internal/logbuf"
+	"nyatunnel-client/internal/service"
 	"nyatunnel-client/internal/shared/version"
 )
 
@@ -42,6 +44,9 @@ const usage = `用法: nyatunnel <命令> [参数]
   logout                     删除本机的设备密钥（服务器上的设备需由管理员吊销）
   link <nyatunnel://…>       解析并校验一个深链
   daemon                     供图形界面使用的后台模式（本机回环 HTTP 接口）
+  service install            安装为系统服务（开机即运行，无需登录；需要管理员 / root）
+  service uninstall [--purge] 卸载系统服务（--purge 同时删除服务使用的设备密钥）
+  service status             查看系统服务状态
   version                    显示版本
 
 环境变量:
@@ -77,6 +82,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdLogout(stdout, stderr)
 	case "daemon":
 		return cmdDaemon(rest, stdin, stdout, stderr)
+	case "service":
+		return cmdService(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知命令 %q\n\n%s", cmd, usage)
 		return 2
@@ -240,6 +247,12 @@ func cmdRun(stderr io.Writer) int {
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return runAgent(ctx, dir, id, log)
+}
+
+// runAgent runs the device until ctx ends; the exit code tells service managers what happened
+// (3: revoked, do not restart).
+func runAgent(ctx context.Context, dir string, id *identity.Identity, log *slog.Logger) int {
 	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log})
 	go func() {
 		for st := range a.Watch() {
@@ -376,4 +389,116 @@ func cmdDaemon(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
 	return 0
+}
+
+func cmdService(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "用法: nyatunnel service install | uninstall [--purge] | status")
+		return 2
+	}
+	switch args[0] {
+	case "install":
+		dir, id, ok := loadIdentity(stderr)
+		if !ok {
+			return 1
+		}
+		exe, err := os.Executable()
+		if err == nil {
+			exe, err = filepath.Abs(exe)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		// The service gets its own copy of the identity in the system directory; the user's copy
+		// is removed so two processes never fight over the same device session.
+		if err := service.Install(exe, service.Info{Server: id.Server, DeviceID: id.DeviceID, DeviceName: id.DeviceName}); err != nil {
+			fmt.Fprintln(stderr, "安装失败:", err)
+			return 1
+		}
+		if err := identity.Save(service.SystemDir(), id); err != nil {
+			fmt.Fprintln(stderr, "保存服务密钥失败:", err)
+			_ = service.Uninstall(false)
+			return 1
+		}
+		if err := identity.Remove(dir); err != nil {
+			fmt.Fprintln(stderr, "警告：无法删除用户目录中的密钥:", err)
+		}
+		fmt.Fprintf(stdout, "已安装并启动系统服务 %s（配置目录 %s）。\n", service.Name, service.SystemDir())
+		return 0
+	case "uninstall":
+		purge := len(args) > 1 && args[1] == "--purge"
+		if err := service.Uninstall(purge); err != nil {
+			fmt.Fprintln(stderr, "卸载失败:", err)
+			return 1
+		}
+		if purge {
+			fmt.Fprintln(stdout, "已卸载系统服务并删除其设备密钥。请让管理员在后台吊销这台设备。")
+		} else {
+			fmt.Fprintf(stdout, "已卸载系统服务。设备密钥仍在 %s，可用 --purge 删除。\n", service.SystemDir())
+		}
+		return 0
+	case "status":
+		st, err := service.QueryStatus()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if !st.Installed {
+			fmt.Fprintln(stdout, "系统服务未安装。")
+			return 0
+		}
+		state := "已停止"
+		if st.Running {
+			state = "运行中"
+		}
+		fmt.Fprintf(stdout, "系统服务 %s：%s %s\n", service.Name, state, st.Detail)
+		if info, err := service.ReadInfo(); err == nil {
+			fmt.Fprintf(stdout, "服务器 %s，设备 %s（%s）\n", info.Server, info.DeviceName, info.DeviceID)
+		}
+		return 0
+	case "run":
+		// Started by the Windows service manager.
+		return runAsService(stderr)
+	default:
+		fmt.Fprintf(stderr, "未知子命令 %q\n", args[0])
+		return 2
+	}
+}
+
+func runAsService(stderr io.Writer) int {
+	dir := service.SystemDir()
+	logFile, err := openServiceLog(dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer logFile.Close()
+	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	code := 0
+	err = service.RunService(func(ctx context.Context) error {
+		id, err := identity.Load(dir)
+		if err != nil {
+			log.Error("cannot load identity", "dir", dir, "err", err)
+			return err
+		}
+		if code = runAgent(ctx, dir, id, log); code != 0 && code != 3 {
+			return fmt.Errorf("agent stopped with code %d", code)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error("service", "err", err)
+		return 1
+	}
+	return code
+}
+
+// openServiceLog appends to nyatunnel.log in dir, starting over beyond 5 MB.
+func openServiceLog(dir string) (*os.File, error) {
+	path := filepath.Join(dir, "nyatunnel.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > 5<<20 {
+		_ = os.Rename(path, path+".old")
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }

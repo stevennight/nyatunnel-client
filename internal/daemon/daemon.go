@@ -18,6 +18,7 @@ import (
 	"nyatunnel-client/internal/enroll"
 	"nyatunnel-client/internal/identity"
 	"nyatunnel-client/internal/logbuf"
+	"nyatunnel-client/internal/service"
 )
 
 // Daemon manages one device identity and its agent.
@@ -112,6 +113,17 @@ type State struct {
 	TunnelErrors map[string]string    `json:"tunnelErrors"`
 	CanRequest   bool                 `json:"canRequest"`
 	ConfigRev    int64                `json:"configRev"`
+	// Service is set when a system service runs a device on this machine.
+	Service *ServiceState `json:"service,omitempty"`
+}
+
+// ServiceState describes the system service (see `nyatunnel service install`).
+type ServiceState struct {
+	Running    bool   `json:"running"`
+	Server     string `json:"server"`
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 // State returns a snapshot.
@@ -120,6 +132,10 @@ func (d *Daemon) State() State {
 	id, a, notice := d.id, d.agent, d.notice
 	d.mu.Unlock()
 	st := State{Version: d.Version, ConfigDir: d.Dir, Notice: notice, Tunnels: []tunnelproto.Tunnel{}, TunnelErrors: map[string]string{}}
+	if info, err := service.ReadInfo(); err == nil {
+		ss, _ := service.QueryStatus()
+		st.Service = &ServiceState{Running: ss.Running, Server: info.Server, DeviceID: info.DeviceID, DeviceName: info.DeviceName, Detail: ss.Detail}
+	}
 	if id == nil {
 		return st
 	}
