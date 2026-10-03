@@ -253,7 +253,7 @@ func cmdRun(stderr io.Writer) int {
 // runAgent runs the device until ctx ends; the exit code tells service managers what happened
 // (3: revoked, do not restart).
 func runAgent(ctx context.Context, dir string, id *identity.Identity, log *slog.Logger) int {
-	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log})
+	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log, Dir: dir})
 	go func() {
 		for st := range a.Watch() {
 			if st.Config == nil {

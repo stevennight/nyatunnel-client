@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -35,8 +36,11 @@ var (
 type State struct {
 	Connected   bool
 	ConnectedAt time.Time
-	LastError   string
-	Config      *tunnelproto.Config
+	// Transport is "direct" (pinned TLS to the server's direct listener) or "proxy" (WebSocket via
+	// the public URL).
+	Transport string
+	LastError string
+	Config    *tunnelproto.Config
 	// TunnelErrors holds the last local error per tunnel id (e.g. local service unreachable).
 	TunnelErrors map[string]string
 }
@@ -47,7 +51,11 @@ type Agent struct {
 	version string
 	gui     bool
 	log     *slog.Logger
-	dial    func(ctx context.Context, url string) (*websocket.Conn, error)
+	dial    func(ctx context.Context, url string, opts *websocket.DialOptions) (*websocket.Conn, error)
+	dir     string // remembers the direct endpoint; "" = never persisted
+
+	direct      *identity.Direct
+	directAfter time.Time // do not retry the direct path before this
 
 	mu       sync.Mutex
 	state    State
@@ -69,6 +77,8 @@ type Options struct {
 	Version  string
 	GUI      bool
 	Log      *slog.Logger
+	// Dir is the identity directory, where the direct endpoint is remembered (optional).
+	Dir string
 }
 
 // New returns an agent; call Run.
@@ -76,14 +86,19 @@ func New(o Options) *Agent {
 	if o.Log == nil {
 		o.Log = slog.New(slog.DiscardHandler)
 	}
-	return &Agent{
+	a := &Agent{
 		id: o.Identity, version: o.Version, gui: o.GUI, log: o.Log, pending: map[string]chan tunnelproto.Result{},
-		stats: map[string]*counter{}, state: State{TunnelErrors: map[string]string{}},
-		dial: func(ctx context.Context, u string) (*websocket.Conn, error) {
-			c, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: map[string][]string{"User-Agent": {"nyatunnel/" + o.Version}}})
+		stats: map[string]*counter{}, state: State{TunnelErrors: map[string]string{}}, dir: o.Dir,
+		dial: func(ctx context.Context, u string, opts *websocket.DialOptions) (*websocket.Conn, error) {
+			opts.HTTPHeader = map[string][]string{"User-Agent": {"nyatunnel/" + o.Version}}
+			c, _, err := websocket.Dial(ctx, u, opts)
 			return c, err
 		},
 	}
+	if o.Dir != "" {
+		a.direct = identity.LoadDirect(o.Dir)
+	}
+	return a
 }
 
 // State returns the current state.
@@ -189,6 +204,48 @@ func (a *Agent) Once(ctx context.Context) (*tunnelproto.Config, error) {
 	}
 }
 
+// connect dials the direct endpoint when one is known and not recently failing, else the public URL.
+func (a *Agent) connect(ctx context.Context) (*websocket.Conn, string, error) {
+	a.mu.Lock()
+	d, after := a.direct, a.directAfter
+	a.mu.Unlock()
+	if d != nil && time.Now().After(after) {
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ws, err := a.dial(dctx, "wss://"+d.Addr+tunnelproto.ConnectPath, &websocket.DialOptions{
+			HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: tunnelproto.PinnedTLS(d.CertSHA256)}},
+		})
+		cancel()
+		if err == nil {
+			return ws, "direct", nil
+		}
+		a.log.Info("direct connection failed; using the public address", "addr", d.Addr, "err", err)
+		a.mu.Lock()
+		a.directAfter = time.Now().Add(10 * time.Minute)
+		a.mu.Unlock()
+	}
+	ws, err := a.dial(ctx, connectURL(a.id.Server), &websocket.DialOptions{})
+	return ws, "proxy", err
+}
+
+// rememberDirect stores the server's direct endpoint from a configuration snapshot.
+func (a *Agent) rememberDirect(ep *tunnelproto.DirectEndpoint) {
+	var d *identity.Direct
+	if ep != nil && ep.Addr != "" && len(ep.CertSHA256) == 64 {
+		d = &identity.Direct{Addr: ep.Addr, CertSHA256: ep.CertSHA256}
+	}
+	a.mu.Lock()
+	same := (a.direct == nil && d == nil) || (a.direct != nil && d != nil && *a.direct == *d)
+	if !same {
+		a.direct, a.directAfter = d, time.Time{}
+	}
+	a.mu.Unlock()
+	if !same && a.dir != "" {
+		if err := identity.SaveDirect(a.dir, d); err != nil {
+			a.log.Warn("cannot remember the direct endpoint", "err", err)
+		}
+	}
+}
+
 func connectURL(server string) string {
 	if rest, ok := strings.CutPrefix(server, "https://"); ok {
 		return "wss://" + rest + tunnelproto.ConnectPath
@@ -204,7 +261,7 @@ func (a *Agent) session(ctx context.Context, firstConfig chan<- *tunnelproto.Con
 		return err
 	}
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	ws, err := a.dial(dctx, connectURL(a.id.Server))
+	ws, transport, err := a.connect(dctx)
 	if err != nil {
 		cancel()
 		return err
@@ -237,10 +294,10 @@ func (a *Agent) session(ctx context.Context, firstConfig chan<- *tunnelproto.Con
 	ctl := tunnelproto.NewControl(stream)
 	a.mu.Lock()
 	a.ctl = ctl
-	a.state.Connected, a.state.ConnectedAt, a.state.LastError = true, time.Now(), ""
+	a.state.Connected, a.state.ConnectedAt, a.state.LastError, a.state.Transport = true, time.Now(), "", transport
 	a.changed()
 	a.mu.Unlock()
-	a.log.Info("connected", "server", a.id.Server, "device", a.id.DeviceID)
+	a.log.Info("connected", "server", a.id.Server, "device", a.id.DeviceID, "transport", transport)
 	defer func() {
 		a.mu.Lock()
 		if a.ctl == ctl {
@@ -314,6 +371,7 @@ func (a *Agent) readControl(ctl *tunnelproto.Control, firstConfig chan<- *tunnel
 }
 
 func (a *Agent) applyConfig(cfg *tunnelproto.Config) {
+	a.rememberDirect(cfg.Direct)
 	a.setState(func(s *State) {
 		s.Config = cfg
 		for id := range s.TunnelErrors {

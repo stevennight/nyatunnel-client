@@ -105,6 +105,7 @@ func Save(dir string, id *Identity) error {
 
 // Remove deletes the identity (logout or revoked).
 func Remove(dir string) error {
+	_ = SaveDirect(dir, nil)
 	err := os.Remove(path(dir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -134,3 +135,37 @@ func NormalizeServer(s string) (string, error) {
 }
 
 func isWindows() bool { return runtime.GOOS == "windows" }
+
+// Direct is the remembered direct endpoint of the server (learned over an authenticated session).
+type Direct struct {
+	Addr       string `json:"addr"`
+	CertSHA256 string `json:"certSha256"`
+}
+
+func directPath(dir string) string { return filepath.Join(dir, "direct.json") }
+
+// LoadDirect returns the remembered direct endpoint, if any.
+func LoadDirect(dir string) *Direct {
+	b, err := os.ReadFile(directPath(dir))
+	if err != nil {
+		return nil
+	}
+	var d Direct
+	if json.Unmarshal(b, &d) != nil || d.Addr == "" || len(d.CertSHA256) != 64 {
+		return nil
+	}
+	return &d
+}
+
+// SaveDirect remembers (or with nil forgets) the direct endpoint.
+func SaveDirect(dir string, d *Direct) error {
+	if d == nil {
+		err := os.Remove(directPath(dir))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	b, _ := json.Marshal(d)
+	return os.WriteFile(directPath(dir), b, 0o600)
+}

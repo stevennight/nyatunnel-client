@@ -2,7 +2,7 @@ github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNU
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/hashicorp/yamux v0.1.2 h1:XtB8kyFOyHXYVFnwT5C3+Bdo8gArse7j2AQ0DA0Uey8=
 github.com/hashicorp/yamux v0.1.2/go.mod h1:C+zze2n6e/7wshOZep2A70/aQU6QBRWJO/G6FT1wIns=
-github.com/stevennight/nyatunnel-common v0.0.0-20261003163831-d8ee8d7c231e h1:mtltu/bnfi0/IBEuSNuh9Fyvjb0O56t0DILJ0J80Csc=
-github.com/stevennight/nyatunnel-common v0.0.0-20261003163831-d8ee8d7c231e/go.mod h1:xtn8oMgwUqvpvkAmDu0+mjMcgTEBdjdKuMjJcIPVnoM=
+github.com/stevennight/nyatunnel-common v0.0.0-20261003172318-bd14ad4e9c9c h1:Pb1yVmyviPjwSC1iNds2QfeOJ9OtWOqrCtGcyL5updY=
+github.com/stevennight/nyatunnel-common v0.0.0-20261003172318-bd14ad4e9c9c/go.mod h1:xtn8oMgwUqvpvkAmDu0+mjMcgTEBdjdKuMjJcIPVnoM=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
 golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

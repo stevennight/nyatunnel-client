@@ -58,7 +58,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 func (d *Daemon) run(id *identity.Identity) {
 	d.halt()
 	ctx, cancel := context.WithCancel(d.ctx)
-	a := agent.New(agent.Options{Identity: id, Version: d.Version, GUI: d.GUI, Log: d.Log})
+	a := agent.New(agent.Options{Identity: id, Version: d.Version, GUI: d.GUI, Log: d.Log, Dir: d.Dir})
 	done := make(chan struct{})
 	d.mu.Lock()
 	d.id, d.agent, d.stop, d.done, d.notice = id, a, cancel, done, ""
@@ -106,6 +106,7 @@ type State struct {
 	Fingerprint  string               `json:"fingerprint,omitempty"`
 	ConfigDir    string               `json:"configDir"`
 	Connected    bool                 `json:"connected"`
+	Transport    string               `json:"transport,omitempty"`
 	ConnectedAt  *time.Time           `json:"connectedAt,omitempty"`
 	LastError    string               `json:"lastError,omitempty"`
 	Notice       string               `json:"notice,omitempty"`
@@ -144,7 +145,7 @@ func (d *Daemon) State() State {
 		return st
 	}
 	as := a.State()
-	st.Connected, st.LastError, st.TunnelErrors = as.Connected, as.LastError, as.TunnelErrors
+	st.Connected, st.LastError, st.TunnelErrors, st.Transport = as.Connected, as.LastError, as.TunnelErrors, as.Transport
 	if as.Connected {
 		t := as.ConnectedAt
 		st.ConnectedAt = &t
