@@ -560,6 +560,20 @@ var ErrOffline = errors.New("not connected to the server")
 
 // Update asks the server to change a tunnel (local target or pause) and waits for its answer.
 func (a *Agent) Update(ctx context.Context, u tunnelproto.TunnelUpdate) error {
+	return a.call(ctx, tunnelproto.TypeTunnelUpdate, u)
+}
+
+// Request files a tunnel request with the administrators.
+func (a *Agent) Request(ctx context.Context, r tunnelproto.TunnelRequest) error {
+	return a.call(ctx, tunnelproto.TypeRequestCreate, r)
+}
+
+// RefusedError is the server's refusal of a request, with its error code.
+type RefusedError struct{ Code string }
+
+func (e *RefusedError) Error() string { return "server refused: " + e.Code }
+
+func (a *Agent) call(ctx context.Context, typ string, payload any) error {
 	a.mu.Lock()
 	ctl := a.ctl
 	id := strconv.FormatInt(a.nextID.Add(1), 10)
@@ -571,7 +585,7 @@ func (a *Agent) Update(ctx context.Context, u tunnelproto.TunnelUpdate) error {
 	if ctl == nil {
 		return ErrOffline
 	}
-	if err := ctl.Send(tunnelproto.TypeTunnelUpdate, id, u); err != nil {
+	if err := ctl.Send(typ, id, payload); err != nil {
 		return err
 	}
 	select {
@@ -580,7 +594,7 @@ func (a *Agent) Update(ctx context.Context, u tunnelproto.TunnelUpdate) error {
 			return ErrOffline
 		}
 		if !r.OK {
-			return fmt.Errorf("server refused: %s", r.Error)
+			return &RefusedError{Code: r.Error}
 		}
 		return nil
 	case <-ctx.Done():

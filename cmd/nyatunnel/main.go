@@ -6,11 +6,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,8 +24,10 @@ import (
 	"github.com/stevennight/nyatunnel-common/deeplink"
 
 	"nyatunnel-client/internal/agent"
+	"nyatunnel-client/internal/daemon"
 	"nyatunnel-client/internal/enroll"
 	"nyatunnel-client/internal/identity"
+	"nyatunnel-client/internal/logbuf"
 	"nyatunnel-client/internal/shared/version"
 )
 
@@ -36,6 +41,7 @@ const usage = `用法: nyatunnel <命令> [参数]
   status                     显示本机注册信息与隧道
   logout                     删除本机的设备密钥（服务器上的设备需由管理员吊销）
   link <nyatunnel://…>       解析并校验一个深链
+  daemon                     供图形界面使用的后台模式（本机回环 HTTP 接口）
   version                    显示版本
 
 环境变量:
@@ -69,6 +75,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdStatus(stdout, stderr)
 	case "logout":
 		return cmdLogout(stdout, stderr)
+	case "daemon":
+		return cmdDaemon(rest, stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知命令 %q\n\n%s", cmd, usage)
 		return 2
@@ -307,5 +315,65 @@ func cmdLogout(stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, "已删除本机设备密钥。请让管理员在后台吊销这台设备。")
+	return 0
+}
+
+// cmdDaemon serves the GUI. The token comes from NYATUNNEL_IPC_TOKEN (the GUI generates it); the
+// chosen address is announced as one JSON line on stdout. With --exit-with-stdin the daemon stops
+// when its parent closes stdin, so a crashed GUI never leaves it behind.
+func cmdDaemon(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	listen := fs.String("listen", "127.0.0.1:0", "loopback address for the GUI API")
+	gui := fs.Bool("gui", false, "started by the desktop app")
+	exitWithStdin := fs.Bool("exit-with-stdin", false, "exit when stdin is closed")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	token := os.Getenv("NYATUNNEL_IPC_TOKEN")
+	if len(token) < 16 {
+		fmt.Fprintln(stderr, "NYATUNNEL_IPC_TOKEN must be set (at least 16 characters)")
+		return 2
+	}
+	host, _, err := net.SplitHostPort(*listen)
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+		fmt.Fprintln(stderr, "--listen must be a loopback address")
+		return 2
+	}
+	dir, ok := configDir(stderr)
+	if !ok {
+		return 1
+	}
+
+	logs := logbuf.New(500)
+	log := slog.New(logs.Handler(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if *exitWithStdin {
+		go func() {
+			io.Copy(io.Discard, stdin)
+			stop()
+		}()
+	}
+	d := &daemon.Daemon{Dir: dir, Version: version.Version, GUI: *gui, Log: log, Logs: logs}
+	if err := d.Start(ctx); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer d.Close()
+
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	srv := &http.Server{Handler: d.Handler(token, stop), ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln)
+	json.NewEncoder(stdout).Encode(map[string]string{"event": "ready", "addr": ln.Addr().String(), "version": version.Version})
+	log.Info("daemon ready", "addr", ln.Addr().String(), "config", dir)
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 	return 0
 }
