@@ -1,0 +1,19 @@
+name: nyatunnel-client
+
+# 1. Enroll once (interactive):
+#    docker compose run --rm client enroll https://tunnel.example.com XXXX-XXXX
+# 2. Start:
+#    docker compose up -d
+services:
+  client:
+    image: "${NYATUNNEL_IMAGE:-ghcr.io/stevennight/nyatunnel}:${NYATUNNEL_VERSION:-latest}"
+    restart: unless-stopped
+    # Host networking: tunnel targets such as 127.0.0.1:8080 mean the host's own services.
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - nyatunnel-data:/data
+
+volumes:
+  nyatunnel-data:

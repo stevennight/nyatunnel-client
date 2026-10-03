@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6d5dfc"/>
+      <stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#g)"/>
+  <!-- cat head shaped like a tunnel portal -->
+  <path d="M272 760 V470 L272 250 L410 360 Q512 330 614 360 L752 250 V470 V760 Z" fill="#fff"/>
+  <!-- tunnel opening -->
+  <path d="M372 760 V560 A140 140 0 0 1 652 560 V760 Z" fill="#5b4be0"/>
+  <circle cx="420" cy="470" r="26" fill="#5b4be0"/>
+  <circle cx="604" cy="470" r="26" fill="#5b4be0"/>
+  <rect x="200" y="752" width="624" height="40" rx="20" fill="#fff"/>
+</svg>

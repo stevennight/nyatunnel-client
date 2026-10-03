@@ -1,0 +1,6 @@
+.git
+.github
+gui
+dist
+stage
+*.md

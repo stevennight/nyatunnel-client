@@ -5,3 +5,10 @@ stage/
 .tmp/
 
 .idea
+
+# GUI (Tauri)
+gui/node_modules/
+gui/src-tauri/target/
+gui/src-tauri/gen/schemas/
+gui/src-tauri/binaries/
+gui/src-tauri/.tauri-release.conf.json
