@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"nyatunnel-client/internal/identity"
 	"nyatunnel-client/internal/logbuf"
 	"nyatunnel-client/internal/service"
+	"nyatunnel-client/internal/update"
 )
 
 // Daemon manages one device identity and its agent.
@@ -36,6 +38,9 @@ type Daemon struct {
 	done   chan struct{}
 	notice string // shown once the device was revoked
 	ctx    context.Context
+
+	update   *UpdateInfo
+	updateAt time.Time
 }
 
 // Start loads the identity (if any) and starts the agent. ctx bounds the daemon's lifetime.
@@ -278,6 +283,35 @@ func (d *Daemon) Request(ctx context.Context, r tunnelproto.TunnelRequest) error
 		return err
 	}
 	return a.Request(ctx, r)
+}
+
+// UpdateInfo tells the GUI whether a newer release exists (the GUI opens the release page; its
+// installer updates the bundled core too).
+type UpdateInfo struct {
+	Current string `json:"current"`
+	Latest  string `json:"latest"`
+	Newer   bool   `json:"newer"`
+	URL     string `json:"url"`
+}
+
+// CheckUpdate asks GitHub at most every six hours unless forced.
+func (d *Daemon) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, error) {
+	d.mu.Lock()
+	cached, at := d.update, d.updateAt
+	d.mu.Unlock()
+	if cached != nil && !force && time.Since(at) < 6*time.Hour {
+		return cached, nil
+	}
+	r, err := update.Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	current := strings.TrimPrefix(d.Version, "v")
+	info := &UpdateInfo{Current: current, Latest: r.Version, Newer: update.Newer(r.Version, current), URL: r.URL}
+	d.mu.Lock()
+	d.update, d.updateAt = info, time.Now()
+	d.mu.Unlock()
+	return info, nil
 }
 
 // Close stops the agent.

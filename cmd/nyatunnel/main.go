@@ -31,6 +31,7 @@ import (
 	"nyatunnel-client/internal/logbuf"
 	"nyatunnel-client/internal/service"
 	"nyatunnel-client/internal/shared/version"
+	"nyatunnel-client/internal/update"
 )
 
 const usage = `用法: nyatunnel <命令> [参数]
@@ -47,6 +48,7 @@ const usage = `用法: nyatunnel <命令> [参数]
   service install            安装为系统服务（开机即运行，无需登录；需要管理员 / root）
   service uninstall [--purge] 卸载系统服务（--purge 同时删除服务使用的设备密钥）
   service status             查看系统服务状态
+  update [--check]           检查并安装新版本（从 GitHub Releases 下载并校验 SHA256SUMS）
   version                    显示版本
 
 环境变量:
@@ -84,6 +86,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdDaemon(rest, stdin, stdout, stderr)
 	case "service":
 		return cmdService(rest, stdout, stderr)
+	case "update":
+		return cmdUpdate(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知命令 %q\n\n%s", cmd, usage)
 		return 2
@@ -388,6 +392,40 @@ func cmdDaemon(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
+	return 0
+}
+
+func cmdUpdate(args []string, stdout, stderr io.Writer) int {
+	checkOnly := len(args) > 0 && args[0] == "--check"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	r, err := update.Latest(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, "检查更新失败:", err)
+		return 1
+	}
+	current := strings.TrimPrefix(version.Version, "v")
+	if !update.Newer(r.Version, current) {
+		fmt.Fprintf(stdout, "已是最新版本（%s）。\n", current)
+		return 0
+	}
+	fmt.Fprintf(stdout, "发现新版本 %s（当前 %s）：%s\n", r.Version, current, r.URL)
+	if checkOnly {
+		return 0
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := update.InstallCLI(ctx, r, exe); err != nil {
+		fmt.Fprintln(stderr, "更新失败:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "已更新。正在运行的 `nyatunnel run` 或系统服务需要重启后才会使用新版本。")
 	return 0
 }
 

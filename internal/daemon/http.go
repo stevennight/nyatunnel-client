@@ -106,6 +106,16 @@ func (d *Daemon) Handler(token string, shutdown func()) http.Handler {
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("GET /v1/update", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		info, err := d.CheckUpdate(ctx, r.URL.Query().Get("force") == "1")
+		if err != nil {
+			fail(w, 502, "update_check_failed", "检查更新失败："+err.Error())
+			return
+		}
+		writeJSON(w, 200, info)
+	})
 	mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 		go shutdown()
