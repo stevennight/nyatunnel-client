@@ -1,0 +1,7 @@
+.gocache/
+bin/
+dist/
+stage/
+.tmp/
+
+.idea
