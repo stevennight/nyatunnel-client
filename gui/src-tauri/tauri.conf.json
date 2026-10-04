@@ -45,6 +45,7 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
+        "template": "windows/installer.nsi",
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false
       }

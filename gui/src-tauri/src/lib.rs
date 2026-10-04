@@ -2,6 +2,7 @@
 //! proxy to the bundled Go core. All tunnel logic lives in the core.
 
 mod sidecar;
+mod update;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -94,6 +95,55 @@ fn autostart_set(app: AppHandle, enabled: bool) -> Result<bool, String> {
     al.is_enabled().map_err(|e| e.to_string())
 }
 
+/// Downloads (through the core, which verifies SHA256SUMS) and installs the latest release.
+/// Windows: the passive installer replaces this app and restarts it, so the app exits here.
+/// Linux AppImage: the file is swapped and the new version started. Otherwise (dmg, deb) the
+/// package is opened for the user. Returns the installer kind.
+#[tauri::command]
+async fn install_update(app: AppHandle, core: State<'_, Arc<Core>>) -> Result<String, CoreError> {
+    let app_image = std::env::var_os("APPIMAGE").is_some();
+    let info = core
+        .request_timeout(
+            "POST",
+            "/v1/update/download",
+            Some(serde_json::json!({ "appImage": app_image })),
+            Duration::from_secs(15 * 60),
+        )
+        .await?;
+    let kind = info
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let path = info.get("path").and_then(Value::as_str).unwrap_or_default();
+    let installer =
+        update::validate(path, &kind).map_err(|e| CoreError::new("update_invalid", e))?;
+    match kind.as_str() {
+        "nsis" | "appimage" => {
+            // Stop the core first so its executable can be replaced.
+            let supervisor = core.inner().clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || supervisor.shutdown()).await;
+            let started = if kind == "nsis" {
+                update::run_nsis(&installer)
+            } else {
+                update::replace_appimage(&installer)
+            };
+            if let Err(e) = started {
+                sidecar::log::warn(&e);
+                return Err(CoreError::new("update_failed", e));
+            }
+            app.exit(0);
+        }
+        _ => {
+            use tauri_plugin_opener::OpenerExt;
+            app.opener()
+                .open_path(installer.to_string_lossy(), None::<&str>)
+                .map_err(|e| CoreError::new("update_failed", format!("无法打开安装包：{e}")))?;
+        }
+    }
+    Ok(kind)
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
@@ -157,6 +207,7 @@ pub fn run() {
             take_pending_links,
             autostart_status,
             autostart_set,
+            install_update,
             quit_app
         ])
         .on_window_event(|window, event| {

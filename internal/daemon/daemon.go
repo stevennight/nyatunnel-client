@@ -314,5 +314,29 @@ func (d *Daemon) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, erro
 	return info, nil
 }
 
+// DownloadedUpdate is a verified installer ready to run.
+type DownloadedUpdate struct {
+	Version string `json:"version"`
+	Path    string `json:"path"`
+	Kind    string `json:"kind"` // nsis, dmg, appimage, deb
+}
+
+// DownloadUpdate fetches the latest release's installer for this platform when it is newer.
+func (d *Daemon) DownloadUpdate(ctx context.Context, appImage bool) (*DownloadedUpdate, error) {
+	r, err := update.Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !update.Newer(r.Version, strings.TrimPrefix(d.Version, "v")) {
+		return nil, errors.New("已是最新版本")
+	}
+	path, kind, err := update.DownloadGUI(ctx, r, appImage)
+	if err != nil {
+		return nil, err
+	}
+	d.Log.Info("update downloaded", "version", r.Version, "path", path)
+	return &DownloadedUpdate{Version: r.Version, Path: path, Kind: kind}, nil
+}
+
 // Close stops the agent.
 func (d *Daemon) Close() { d.halt() }

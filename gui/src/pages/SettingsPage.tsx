@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { api, RELEASES_URL, type CoreState, type CoreStatus, type UpdateInfo } from "../api";
+import { api, autoUpdateEnabled, RELEASES_URL, setAutoUpdateEnabled, type CoreState, type CoreStatus, type UpdateInfo } from "../api";
+import type { InstallState } from "../App";
 import { ConfirmDialog, copyText, useNotify } from "../components/ui";
 import { openExternal } from "../open";
 import { errorMessage, formatTime, hostOf, transportLabel } from "../util";
@@ -10,6 +11,8 @@ export function SettingsPage(props: {
   coreStatus: CoreStatus | null;
   update: UpdateInfo | null;
   onUpdate: (u: UpdateInfo) => void;
+  install: InstallState | null;
+  onInstall: (version: string) => void;
   onLoggedOut: (st: CoreState) => void;
 }) {
   const { state } = props;
@@ -20,6 +23,7 @@ export function SettingsPage(props: {
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
   const [updateMsg, setUpdateMsg] = useState("");
+  const [autoUpdate, setAutoUpdate] = useState(autoUpdateEnabled);
 
   useEffect(() => {
     getVersion().then(setGuiVersion, () => setGuiVersion(""));
@@ -101,6 +105,17 @@ export function SettingsPage(props: {
           开机自动启动（启动后最小化到托盘）
         </label>
         <div className="hint" style={{ marginBottom: 10 }}>关闭窗口时 NyaTunnel 会继续在托盘中运行；从托盘菜单选择“退出”才会断开所有隧道。</div>
+        <label className="chk">
+          <input type="checkbox" checked={autoUpdate}
+            onChange={(e) => {
+              setAutoUpdateEnabled(e.target.checked);
+              setAutoUpdate(e.target.checked);
+            }} />
+          自动下载并安装新版本
+        </label>
+        <div className="hint" style={{ marginBottom: 10 }}>
+          每 6 小时检查一次。安装包会先核对发布页的 SHA256 校验和；Windows 上直接覆盖安装并重启，隧道会短暂断开。
+        </div>
       </div>
       <div className="fs">
         <h4>关于</h4>
@@ -112,8 +127,12 @@ export function SettingsPage(props: {
         {props.update?.newer && (
           <div className="infobox inline wrap" data-testid="update-available">
             <span className="spacer">发现新版本 <b>{props.update.latest.replace(/^v/, "")}</b>（当前 {props.update.current.replace(/^v/, "")}）</span>
-            <button className="btn p sm" onClick={() => openExternal(props.update?.url || RELEASES_URL).catch((e) => notify(errorMessage(e), "bad"))}>
-              下载新版本
+            <button className="btn p sm" disabled={!!props.install && !props.install.error}
+              onClick={() => props.onInstall(props.update?.latest ?? "")}>
+              {props.install && !props.install.error ? "正在更新…" : "立即更新"}
+            </button>
+            <button className="btn sm" onClick={() => openExternal(props.update?.url || RELEASES_URL).catch((e) => notify(errorMessage(e), "bad"))}>
+              发布页
             </button>
           </div>
         )}

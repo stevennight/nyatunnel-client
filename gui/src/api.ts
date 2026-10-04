@@ -143,6 +143,18 @@ export const api = {
     core<{ ok: boolean }>("POST", `/v1/tunnels/${encodeURIComponent(id)}`, change),
   request: (body: TunnelRequestBody) => core<{ ok: boolean }>("POST", "/v1/requests", body),
   checkUpdate: (force = false) => core<UpdateInfo>("GET", force ? "/v1/update?force=1" : "/v1/update"),
+  /**
+   * Downloads the latest release's installer (verified by the core) and installs it. On Windows
+   * and with an AppImage the app is replaced and restarted, so this only returns on failure or
+   * when the package was opened for the user (macOS dmg, Linux deb). Resolves to the kind.
+   */
+  installUpdate: async () => {
+    try {
+      return await invoke<string>("install_update");
+    } catch (e) {
+      throw toCoreError(e);
+    }
+  },
   coreStatus: () => invoke<CoreStatus>("core_status"),
   takePendingLinks: () => invoke<string[]>("take_pending_links"),
   autostartEnabled: () => invoke<boolean>("autostart_status"),
@@ -151,3 +163,22 @@ export const api = {
 };
 
 export const RELEASES_URL = "https://github.com/stevennight/nyatunnel-client/releases";
+
+const AUTO_UPDATE_KEY = "nyatunnel.autoUpdate";
+
+/** Whether new versions are downloaded and installed without asking (default on, per user). */
+export function autoUpdateEnabled(): boolean {
+  try {
+    return localStorage.getItem(AUTO_UPDATE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function setAutoUpdateEnabled(on: boolean) {
+  try {
+    localStorage.setItem(AUTO_UPDATE_KEY, on ? "on" : "off");
+  } catch {
+    // Storage unavailable: the default (on) applies.
+  }
+}

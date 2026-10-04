@@ -179,38 +179,104 @@ func extract(name string, archive []byte) ([]byte, error) {
 	}
 }
 
-// InstallCLI downloads, verifies and installs the CLI of release r over exe.
-func InstallCLI(ctx context.Context, r *Release, exe string) error {
-	name := CLIAsset(r.Version)
-	archiveURL, ok := r.AssetURL(name)
+// fetchVerified downloads a release asset and checks it against the release's SHA256SUMS.
+func fetchVerified(ctx context.Context, r *Release, name string, limit int64) ([]byte, error) {
+	assetURL, ok := r.AssetURL(name)
 	if !ok {
-		return fmt.Errorf("release %s has no %s", r.Version, name)
+		return nil, fmt.Errorf("release %s has no %s", r.Version, name)
 	}
 	sumsURL, ok := r.AssetURL("SHA256SUMS")
 	if !ok {
-		return errors.New("release has no SHA256SUMS")
+		return nil, errors.New("release has no SHA256SUMS")
 	}
 	sums, err := download(ctx, sumsURL, 1<<20)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	want, ok := expectedSum(sums, name)
 	if !ok {
-		return fmt.Errorf("SHA256SUMS does not list %s", name)
+		return nil, fmt.Errorf("SHA256SUMS does not list %s", name)
 	}
-	archive, err := download(ctx, archiveURL, 200<<20)
+	data, err := download(ctx, assetURL, limit)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != want {
+		return nil, errors.New("checksum mismatch: refusing to install")
+	}
+	return data, nil
+}
+
+// InstallCLI downloads, verifies and installs the CLI of release r over exe.
+func InstallCLI(ctx context.Context, r *Release, exe string) error {
+	name := CLIAsset(r.Version)
+	archive, err := fetchVerified(ctx, r, name, 200<<20)
 	if err != nil {
 		return err
-	}
-	sum := sha256.Sum256(archive)
-	if hex.EncodeToString(sum[:]) != want {
-		return errors.New("checksum mismatch: refusing to install")
 	}
 	bin, err := extract(name, archive)
 	if err != nil {
 		return err
 	}
 	return replace(exe, bin)
+}
+
+// Installer kinds of the desktop app.
+const (
+	KindNSIS     = "nsis"     // Windows: run passively, it replaces the installed app and restarts it
+	KindDMG      = "dmg"      // macOS: opened for the user
+	KindAppImage = "appimage" // Linux AppImage: replaces the running file
+	KindDeb      = "deb"      // Linux package: opened with the system installer
+)
+
+// GUIAsset is this platform's desktop installer for a version. appImage tells whether the app
+// runs from an AppImage (Linux).
+func GUIAsset(version string, appImage bool) (name, kind string, ok bool) {
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "windows/amd64":
+		return fmt.Sprintf("NyaTunnel_%s_windows_x64.exe", version), KindNSIS, true
+	case "darwin/arm64":
+		return fmt.Sprintf("NyaTunnel_%s_macos_arm64.dmg", version), KindDMG, true
+	case "darwin/amd64":
+		return fmt.Sprintf("NyaTunnel_%s_macos_x64.dmg", version), KindDMG, true
+	case "linux/amd64":
+		if appImage {
+			return fmt.Sprintf("NyaTunnel_%s_linux_x64.AppImage", version), KindAppImage, true
+		}
+		return fmt.Sprintf("NyaTunnel_%s_linux_x64.deb", version), KindDeb, true
+	}
+	return "", "", false
+}
+
+// UpdateDir is where downloaded installers are kept; the desktop app only runs files from here.
+func UpdateDir() string { return filepath.Join(os.TempDir(), "NyaTunnel-update") }
+
+// DownloadGUI fetches and verifies this platform's installer of release r into UpdateDir and
+// returns its path and kind.
+func DownloadGUI(ctx context.Context, r *Release, appImage bool) (string, string, error) {
+	name, kind, ok := GUIAsset(r.Version, appImage)
+	if !ok {
+		return "", "", fmt.Errorf("no desktop installer for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	dir := UpdateDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", err
+	}
+	path := filepath.Join(dir, name)
+	data, err := fetchVerified(ctx, r, name, 300<<20)
+	if err != nil {
+		return "", "", err
+	}
+	tmp := path + ".part"
+	if err := os.WriteFile(tmp, data, 0o700); err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return "", "", err
+	}
+	return path, kind, nil
 }
 
 // replace swaps the executable. A running Windows executable cannot be overwritten but can be

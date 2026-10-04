@@ -116,6 +116,20 @@ func (d *Daemon) Handler(token string, shutdown func()) http.Handler {
 		}
 		writeJSON(w, 200, info)
 	})
+	mux.HandleFunc("POST /v1/update/download", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AppImage bool `json:"appImage"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+		defer cancel()
+		info, err := d.DownloadUpdate(ctx, body.AppImage)
+		if err != nil {
+			fail(w, 502, "update_download_failed", "下载更新失败："+err.Error())
+			return
+		}
+		writeJSON(w, 200, info)
+	})
 	mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 		go shutdown()

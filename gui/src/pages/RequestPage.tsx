@@ -33,7 +33,8 @@ export function RequestPage(props: { canRequest: boolean; connected: boolean }) 
     setError("");
     const localPort = Number(port);
     if (!form.localIp.trim()) return setError("请填写本地地址");
-    if (!isValidPort(localPort)) return setError("端口应为 1–65535");
+    if (!port) return setError("请填写本地端口：本机上被转发的服务监听的端口（公网端口由服务器自动分配）");
+    if (!isValidPort(localPort)) return setError("本地端口应为 1–65535");
     if (form.type === "https" && form.subdomain && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(form.subdomain)) {
       return setError("子域只能包含小写字母、数字和连字符");
     }

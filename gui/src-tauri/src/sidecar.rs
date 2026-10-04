@@ -39,7 +39,7 @@ pub struct CoreError {
 }
 
 impl CoreError {
-    fn new(error: &str, message: impl Into<String>) -> Self {
+    pub fn new(error: &str, message: impl Into<String>) -> Self {
         Self {
             error: error.into(),
             message: message.into(),
@@ -243,6 +243,18 @@ impl Core {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, CoreError> {
+        self.request_timeout(method, path, body, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Like `request`, with a custom timeout (downloads take longer than the default).
+    pub async fn request_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, CoreError> {
         if !valid_path(path) {
             return Err(CoreError::new("bad_request", "无效的请求路径"));
         }
@@ -263,10 +275,12 @@ impl Core {
                 ),
             _ => return Err(CoreError::new("bad_request", "不支持的请求方法")),
         };
-        let resp =
-            req.bearer_auth(&conn.token).send().await.map_err(|e| {
-                CoreError::new("core_unavailable", format!("无法连接核心服务：{e}"))
-            })?;
+        let resp = req
+            .timeout(timeout)
+            .bearer_auth(&conn.token)
+            .send()
+            .await
+            .map_err(|e| CoreError::new("core_unavailable", format!("无法连接核心服务：{e}")))?;
         let status = resp.status();
         let bytes = resp
             .bytes()
@@ -357,7 +371,7 @@ fn valid_path(path: &str) -> bool {
         && path.chars().all(|c| c.is_ascii_graphic())
 }
 
-mod log {
+pub(crate) mod log {
     pub fn warn(msg: &str) {
         eprintln!("[nyatunnel-gui] {msg}");
     }

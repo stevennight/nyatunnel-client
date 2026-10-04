@@ -21,7 +21,7 @@ NyaTunnel 由三个独立仓库组成，通过服务端仓库的 `docs/协议.md
 | `internal/daemon` | 供 GUI 使用的本机回环接口 |
 | `internal/service` | 系统服务（Windows 服务 / systemd / launchd） |
 | `internal/identity` | 设备身份；私钥优先存系统钥匙串 |
-| `internal/update` | 自更新（校验 `SHA256SUMS`） |
+| `internal/update` | 自更新：CLI 与桌面安装包，都先核对 Release 的 `SHA256SUMS` |
 | `gui/` | Tauri 2 + React 桌面程序，Go 核心作为 sidecar 打包 |
 
 ## 命令行
@@ -69,6 +69,10 @@ go run ./cmd/nyatunnel link "nyatunnel://enroll?v=1&s=tunnel.example.net&c=K7QP-
 - 关闭窗口最小化到托盘（菜单：显示窗口 / 退出），退出时先请求核心正常关闭。
 - 深链 `nyatunnel://enroll?…` 只会打开确认对话框：先向服务器取回预览（服务器、邀请人、将获得的隧道），用户点“确认加入”后才生成密钥并注册；首次连接的服务器和会切换服务器的链接都有醒目提示。`nyatunnel://open?…` 只聚焦窗口并定位隧道。第二个实例（Windows / Linux 点击链接时）会把链接交给已运行的实例。
 - 页面：首次启动、我的隧道、隧道详情、申请隧道、日志、设置；核心以系统服务运行时显示“本机由系统服务运行”。
+- 自动更新（设置里可关闭，默认开启）：启动时和每 6 小时检查一次 GitHub Releases，发现新版本就由核心下载本平台的安装包并核对 `SHA256SUMS`（`POST /v1/update/download`，只写入系统临时目录下的 `NyaTunnel-update`），再由 Rust 命令 `install_update` 校验路径后安装：
+  - Windows：停止核心，以 `/P /R` 静默运行 NSIS 安装包后退出；安装包直接覆盖安装并重启，**不会询问是否先卸载**（见下方自定义模板）。
+  - Linux AppImage：替换 `$APPIMAGE` 并启动新版本；deb 与 macOS dmg 打开安装包，由用户完成。
+  - 开发构建和由系统服务运行核心时不自动安装（设置里仍可手动“立即更新”）。
 
 开发需要 Node 24、Rust stable、Go，以及各平台的 [Tauri 依赖](https://v2.tauri.app/start/prerequisites/)（Windows：VS Build Tools + WebView2；Linux：`libwebkit2gtk-4.1-dev` 等，见 `.github/workflows/ci.yml`）。
 
@@ -87,6 +91,8 @@ npm run dev                      # tauri dev，使用独立的 .dev 标识（Vit
 node scripts/build-sidecar.mjs
 node scripts/tauri-build.mjs --bundles nsis
 ```
+
+Windows 安装包使用自定义 NSIS 模板 `gui/src-tauri/windows/installer.nsi`：复制自 Tauri 自带模板（tauri-cli v2.12.1），只改了两处（标有 `NyaTunnel:`）——已安装时不显示“先卸载旧版本？”页面而是直接覆盖安装，以及覆盖前关闭正在运行的核心 `nyatunnel.exe`。**升级 `@tauri-apps/cli` 时要重新复制上游模板并重做这两处修改。**
 
 `scripts/build-sidecar.mjs` 接受 `--target <三元组>`（或环境变量 `TAURI_TARGET_TRIPLE`），版本取 `NYATUNNEL_VERSION` 或 `VERSION`，与 CLI 发布使用相同的 `-ldflags`。`scripts/tauri-build.mjs` 在设置 `NYATUNNEL_VERSION` 时通过临时配置注入版本，其余参数原样传给 `tauri build`。`gui/package.json` 的 `version` 必须与 `VERSION` 一致（CI 会检查）。
 

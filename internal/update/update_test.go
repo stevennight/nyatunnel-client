@@ -83,3 +83,38 @@ func TestInstallCLI(t *testing.T) {
 		t.Fatalf("binary not replaced: %q", b)
 	}
 }
+
+func TestDownloadGUI(t *testing.T) {
+	name, kind, ok := GUIAsset("9.9.9", false)
+	if !ok {
+		t.Skip("no desktop installer for this platform")
+	}
+	payload := []byte("installer bytes")
+	sum := sha256.Sum256(payload)
+	sums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), name)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/i":
+			w.Write(payload)
+		case "/sums":
+			w.Write([]byte(sums))
+		}
+	}))
+	defer srv.Close()
+	r := &Release{Version: "9.9.9", assets: map[string]string{name: srv.URL + "/i", "SHA256SUMS": srv.URL + "/sums"}}
+	path, gotKind, err := DownloadGUI(context.Background(), r, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	if gotKind != kind || filepath.Dir(path) != UpdateDir() || filepath.Base(path) != name {
+		t.Fatalf("got %s %s", path, gotKind)
+	}
+	if b, _ := os.ReadFile(path); string(b) != string(payload) {
+		t.Fatal("wrong content")
+	}
+	sums = strings.Repeat("1", 64) + "  " + name + "\n"
+	if _, _, err := DownloadGUI(context.Background(), r, false); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("tampered installer accepted: %v", err)
+	}
+}

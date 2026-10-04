@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, RELEASES_URL, type CoreState, type UpdateInfo } from "./api";
+import { api, autoUpdateEnabled, RELEASES_URL, type CoreState, type UpdateInfo } from "./api";
 import { EnrollDialog, type EnrollRequest } from "./components/EnrollDialog";
 import { useNotify } from "./components/ui";
 import { useCoreState, useCoreStatus, useDeepLinks, useLogs } from "./hooks";
@@ -20,6 +20,14 @@ type Page =
   | { name: "logs" }
   | { name: "settings" };
 
+/** An update being installed, or the reason the last attempt failed. */
+export interface InstallState {
+  version: string;
+  error?: string;
+}
+
+const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
+
 export function App() {
   const notify = useNotify();
   const coreStatus = useCoreStatus();
@@ -29,7 +37,8 @@ export function App() {
   const [page, setPage] = useState<Page>({ name: "tunnels" });
   const [enroll, setEnroll] = useState<EnrollRequest | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const updateChecked = useRef(false);
+  const [install, setInstall] = useState<InstallState | null>(null);
+  const installing = useRef(false);
 
   const stateRef = useRef<CoreState | null>(state);
   stateRef.current = state;
@@ -75,12 +84,45 @@ export function App() {
 
   useDeepLinks(running && state !== null, handleLink);
 
-  // One quiet update check per start; failures are ignored here (设置 shows them on demand).
+  const installUpdate = useCallback(
+    async (version: string) => {
+      if (installing.current) return;
+      installing.current = true;
+      setInstall({ version });
+      try {
+        const kind = await api.installUpdate();
+        // Windows and AppImage exit here and come back as the new version.
+        if (kind === "dmg" || kind === "deb") {
+          setInstall(null);
+          notify("已打开新版本安装包，请按提示完成安装。", "ok");
+        }
+      } catch (e) {
+        setInstall({ version, error: errorMessage(e) });
+      } finally {
+        installing.current = false;
+      }
+    },
+    [notify]
+  );
+
+  // Quiet update checks at start and every 6 hours; failures are ignored here (设置 shows them on
+  // demand). A newer release is installed right away unless the user turned that off, the build
+  // is a development one, or a system service runs the core (the installer could not replace it).
+  const ready = running && state !== null;
   useEffect(() => {
-    if (!running || !state || updateChecked.current) return;
-    updateChecked.current = true;
-    api.checkUpdate().then(setUpdate, () => undefined);
-  }, [running, state]);
+    if (!ready) return;
+    const check = () =>
+      api.checkUpdate().then((u) => {
+        setUpdate(u);
+        const dev = import.meta.env.DEV || /dev/.test(u.current);
+        if (u.newer && autoUpdateEnabled() && !dev && !stateRef.current?.service?.running) {
+          void installUpdate(u.latest);
+        }
+      }, () => undefined);
+    void check();
+    const t = setInterval(check, UPDATE_INTERVAL);
+    return () => clearInterval(t);
+  }, [ready, installUpdate]);
 
   // Leave pages that no longer apply.
   useEffect(() => {
@@ -94,11 +136,23 @@ export function App() {
           ⚠ NyaTunnel 核心异常{coreStatus.error ? `：${coreStatus.error}` : ""}。正在自动重启（第 {coreStatus.restarts} 次）…
         </div>
       )}
+      {install && !install.error && (
+        <div className="banner warn" role="status" data-testid="installing">
+          正在下载并安装 NyaTunnel {install.version.replace(/^v/, "")}，完成后会自动重启…
+        </div>
+      )}
+      {install?.error && (
+        <div className="banner bad" role="alert">
+          <span className="spacer">自动更新失败：{install.error}</span>
+          <button className="btn sm" onClick={() => installUpdate(install.version)}>重试</button>
+          <button className="btn sm" onClick={() => openExternal(update?.url || RELEASES_URL).catch(() => undefined)}>手动下载</button>
+        </div>
+      )}
       {state?.notice && (
         <div className="banner warn" role="alert">
           <span className="spacer">{state.notice}</span>
-          {/升级|更新/.test(state.notice) && (
-            <button className="btn sm" onClick={() => openExternal(RELEASES_URL).catch(() => undefined)}>下载新版本</button>
+          {/升级|更新/.test(state.notice) && !install && (
+            <button className="btn sm" onClick={() => installUpdate(update?.latest ?? "")}>立即更新</button>
           )}
         </div>
       )}
@@ -208,6 +262,8 @@ export function App() {
               coreStatus={coreStatus}
               update={update}
               onUpdate={setUpdate}
+              install={install}
+              onInstall={installUpdate}
               onLoggedOut={(st) => {
                 setState(st);
                 setPage({ name: "tunnels" });
