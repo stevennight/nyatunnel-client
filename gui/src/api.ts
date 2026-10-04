@@ -13,7 +13,7 @@ export interface Display {
   limits?: string;
 }
 
-export type TunnelType = "https" | "tcp" | "udp";
+export type TunnelType = "https" | "tcp" | "udp" | "tcpudp";
 
 export interface Tunnel {
   id: string;
