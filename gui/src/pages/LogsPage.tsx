@@ -23,7 +23,8 @@ export function LogsPage(props: { lines: LogLine[]; onClear: () => void }) {
           </label>
           <button className="btn sm" onClick={async () => {
             const text = lines.map((l) => `${l.time} ${l.level.toUpperCase()} ${l.text}`).join("\n");
-            notify((await copyText(text)) ? "已复制日志" : "复制失败");
+            const ok = await copyText(text);
+            notify(ok ? "已复制日志" : "复制失败", ok ? "ok" : "bad");
           }}>复制</button>
           <button className="btn sm" onClick={props.onClear}>清空</button>
         </div>

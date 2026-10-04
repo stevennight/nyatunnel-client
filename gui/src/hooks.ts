@@ -60,6 +60,7 @@ const MAX_LINES = 1000;
 export function useLogs(running: boolean, interval = 1500) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const after = useRef(0);
+  const run = useRef(0);
 
   useEffect(() => {
     if (!running) return;
@@ -68,8 +69,8 @@ export function useLogs(running: boolean, interval = 1500) {
     const tick = async () => {
       try {
         const r = await api.logs(after.current);
-        const got = r.lines ?? [];
-        if (got.length > 0) {
+        const got = (r.lines ?? []).map((l) => ({ ...l, run: run.current }));
+        if (got.length > 0 && !stopped) {
           after.current = got[got.length - 1].seq;
           setLines((ls) => [...ls, ...got].slice(-MAX_LINES));
         }
@@ -87,7 +88,10 @@ export function useLogs(running: boolean, interval = 1500) {
 
   // When the core restarts its sequence numbers restart too.
   useEffect(() => {
-    if (!running) after.current = 0;
+    if (!running) {
+      after.current = 0;
+      run.current++;
+    }
   }, [running]);
 
   const clear = useCallback(() => setLines([]), []);

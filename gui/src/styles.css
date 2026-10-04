@@ -28,7 +28,8 @@ body {
   font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased; user-select: none;
 }
-input, textarea, select, .selectable, .mono, .log { user-select: text; }
+input, textarea, select, .selectable, .mono, .log,
+.err, .hint, .banner, .toast, .kv > span, .warnbox, .badbox, .infobox, .lockline { user-select: text; }
 code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
 code { background: var(--code); padding: 1px 6px; border-radius: 4px; }
 a { color: var(--brand); cursor: pointer; }
@@ -38,16 +39,22 @@ h3 { margin: 0 0 12px; font-size: 16px; }
 /* shell */
 .shell { display: grid; grid-template-columns: 190px 1fr; height: 100%; }
 .nav { background: var(--panel-2); border-right: 1px solid var(--line); padding: 12px 8px; display: flex; flex-direction: column; min-height: 0; }
-.nav .logo { font-weight: 700; padding: 4px 10px 14px; display: flex; align-items: center; gap: 8px; }
-.nav .logo i { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, var(--brand), #c084fc); display: inline-block; }
+.nav .logo { font-weight: 700; padding: 4px 10px 14px; display: flex; align-items: center; gap: 8px; flex: none; }
+.nav .logo img { width: 24px; height: 24px; display: block; flex: none; }
+/* Only the menu scrolls; the logo and the connection footer stay in place. */
+.nav-items { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
 .nav .it { padding: 7px 10px; border-radius: 8px; color: var(--muted); cursor: pointer; border: 0; background: none; text-align: left; font: inherit; width: 100%; }
 .nav .it:hover { color: var(--text); }
 .nav .it.on { background: var(--brand-weak); color: var(--brand); font-weight: 600; }
-.nav .who { margin-top: auto; padding: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.nav .who { flex: none; padding: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .nav .who b { color: var(--text); }
+.nav .who .err { max-height: 6em; overflow-y: auto; }
 .main { padding: 16px 20px; min-width: 0; overflow: auto; }
+/* The logs page fills the pane instead of guessing its height from the window. */
+.main.fill { display: flex; flex-direction: column; }
+.main.fill > .log.big { flex: 1; height: auto; min-height: 160px; }
 .page-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.page-wrap > .shell { flex: 1; min-height: 0; }
+.page-wrap > .shell, .page-wrap > .center { flex: 1; min-height: 0; height: auto; }
 
 .ttl { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
 
@@ -123,6 +130,7 @@ h3 { margin: 0 0 12px; font-size: 16px; }
 
 /* dialog */
 .modal-bg { position: fixed; inset: 0; background: rgba(16, 24, 40, .45); display: flex; justify-content: center; align-items: flex-start; padding: 40px 16px; overflow: auto; z-index: 20; }
+.modal:focus { outline: none; }
 .modal { background: var(--panel); border-radius: 12px; box-shadow: var(--shadow); width: 560px; max-width: 100%; padding: 18px 20px; border: 1px solid var(--line); }
 .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .warnbox { background: var(--warn-weak); border: 1px solid var(--warn); color: var(--text); border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 10px 0; }
@@ -143,6 +151,7 @@ h3 { margin: 0 0 12px; font-size: 16px; }
   .nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); }
   .nav .logo, .nav .who { display: none; }
   .nav .it { width: auto; }
+  .nav-items { display: flex; flex-wrap: wrap; overflow: visible; }
   .grid2 { grid-template-columns: 1fr; }
   .form .row { grid-template-columns: 1fr; }
 }

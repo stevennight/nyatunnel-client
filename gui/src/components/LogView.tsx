@@ -29,7 +29,7 @@ export function LogView(props: { lines: LogLine[]; className?: string; empty?: s
     >
       {props.lines.length === 0 && <span className="t">{props.empty ?? "暂无日志"}</span>}
       {props.lines.map((l) => (
-        <div key={l.seq}>
+        <div key={`${l.run ?? 0}-${l.seq}`}>
           <span className={levelClass(l.level)}>{clockTime(l.time)}</span> {l.text}
         </div>
       ))}

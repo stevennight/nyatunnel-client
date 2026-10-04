@@ -89,7 +89,10 @@ function TunnelCard(props: {
       <div className="inline">
         <button
           className="btn sm"
-          onClick={async () => notify((await copyText(t.publicUrl)) ? "已复制公网地址" : "复制失败", "ok")}
+          onClick={async () => {
+            const ok = await copyText(t.publicUrl);
+            notify(ok ? "已复制公网地址" : "复制失败，请在详情页手动选中复制", ok ? "ok" : "bad");
+          }}
         >
           复制
         </button>

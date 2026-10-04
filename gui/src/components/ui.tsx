@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 export function Switch(props: {
   checked: boolean;
@@ -21,10 +21,27 @@ export function Switch(props: {
   );
 }
 
-export function Modal(props: { title: string; children: ReactNode }) {
+/** A dialog. Escape calls `onClose` when given (callers leave it out while busy). */
+export function Modal(props: { title: string; children: ReactNode; onClose?: () => void }) {
+  const panel = useRef<HTMLDivElement>(null);
+  const close = useRef(props.onClose);
+  close.current = props.onClose;
+  useEffect(() => {
+    // Move keyboard focus into the dialog (first field, else the dialog itself) so Tab and Enter
+    // don't act on the page behind it.
+    const el = panel.current;
+    if (el && !el.contains(document.activeElement)) {
+      (el.querySelector<HTMLElement>("input:not([disabled]), select:not([disabled]), textarea:not([disabled])") ?? el).focus();
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close.current?.();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   return (
     <div className="modal-bg">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={props.title}>
+      <div ref={panel} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-label={props.title}>
         <h3>{props.title}</h3>
         {props.children}
       </div>
@@ -42,11 +59,11 @@ export function ConfirmDialog(props: {
   onCancel: () => void;
 }) {
   return (
-    <Modal title={props.title}>
+    <Modal title={props.title} onClose={props.busy ? undefined : props.onCancel}>
       {props.children}
       <div className="actions">
-        <button className="btn" onClick={props.onCancel} disabled={props.busy}>取消</button>
-        <button className={props.danger ? "btn d" : "btn p"} onClick={props.onConfirm} disabled={props.busy}>
+        <button className="btn" onClick={props.onCancel} disabled={props.busy} autoFocus={props.danger}>取消</button>
+        <button className={props.danger ? "btn d" : "btn p"} onClick={props.onConfirm} disabled={props.busy} autoFocus={!props.danger}>
           {props.confirmLabel}
         </button>
       </div>
@@ -70,7 +87,8 @@ export function ToastProvider(props: { children: ReactNode }) {
   const notify = useCallback<Notify>((text, kind = "info") => {
     const id = next.current++;
     setToasts((ts) => [...ts.slice(-3), { id, kind, text }]);
-    setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 4000);
+    // Errors stay longer: they are often worth reading twice or copying.
+    setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), kind === "bad" ? 8000 : 4000);
   }, []);
   const value = useMemo(() => notify, [notify]);
   return (

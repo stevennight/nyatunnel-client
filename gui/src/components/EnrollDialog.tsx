@@ -27,7 +27,9 @@ export function EnrollDialog(props: {
   const [server, setServer] = useState(request.server);
   const [loadError, setLoadError] = useState("");
   const [name, setName] = useState("");
-  const [autostart, setAutostart] = useState(true);
+  // A first enroll offers autostart; a re-enroll or server switch keeps whatever the user chose.
+  const [autostart, setAutostart] = useState(!current?.enrolled);
+  const [autostartWas, setAutostartWas] = useState(false);
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
@@ -49,6 +51,23 @@ export function EnrollDialog(props: {
     };
   }, [request.server, request.code]);
 
+  useEffect(() => {
+    if (!current?.enrolled) return;
+    let cancelled = false;
+    api.autostartEnabled().then(
+      (on) => {
+        if (cancelled) return;
+        setAutostart(on);
+        setAutostartWas(on);
+      },
+      () => undefined
+    );
+    return () => {
+      cancelled = true;
+    };
+    // Read once when the dialog opens.
+  }, []);
+
   const host = hostOf(server);
   const enrolledHost = current?.enrolled ? hostOf(current.server) : "";
   const switching = Boolean(request.switchServer) || (enrolledHost !== "" && enrolledHost !== host);
@@ -60,8 +79,8 @@ export function EnrollDialog(props: {
     setSubmitError("");
     try {
       const st = await api.enroll(server, request.code, name.trim());
-      if (autostart) {
-        await api.setAutostart(true).catch(() => undefined);
+      if (autostart !== autostartWas) {
+        await api.setAutostart(autostart).catch(() => undefined);
       }
       props.onDone(st);
     } catch (e) {
@@ -71,7 +90,7 @@ export function EnrollDialog(props: {
   }
 
   return (
-    <Modal title="加入 NyaTunnel 服务器？">
+    <Modal title="加入 NyaTunnel 服务器？" onClose={busy ? undefined : props.onCancel}>
       {!preview && !loadError && <div className="hint">正在向 {host || "服务器"} 获取邀请信息…</div>}
       {loadError && (
         <>
@@ -101,6 +120,7 @@ export function EnrollDialog(props: {
                 maxLength={64}
                 placeholder="默认使用主机名"
                 onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !busy && void confirm()}
                 style={{ width: 220 }}
               />
             </span>

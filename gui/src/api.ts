@@ -60,6 +60,8 @@ export interface CoreState {
 
 export interface LogLine {
   seq: number;
+  /** Set by useLogs: which core run the line came from (seq restarts with the core). */
+  run?: number;
   time: string;
   level: string;
   text: string;

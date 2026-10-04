@@ -32,7 +32,7 @@ export function App() {
   const notify = useNotify();
   const coreStatus = useCoreStatus();
   const running = coreStatus?.state === "running";
-  const { state, setState, refresh } = useCoreState(running);
+  const { state, setState, error: stateError, refresh } = useCoreState(running);
   const { lines, clear } = useLogs(running);
   const [page, setPage] = useState<Page>({ name: "tunnels" });
   const [enroll, setEnroll] = useState<EnrollRequest | null>(null);
@@ -136,6 +136,16 @@ export function App() {
           ⚠ NyaTunnel 核心异常{coreStatus.error ? `：${coreStatus.error}` : ""}。正在自动重启（第 {coreStatus.restarts} 次）…
         </div>
       )}
+      {state && coreStatus && coreStatus.state !== "running" && coreStatus.state !== "error" && (
+        <div className="banner warn" role="status">
+          NyaTunnel 核心正在重新启动，下面显示的是重启前的状态，暂时无法操作…
+        </div>
+      )}
+      {state && running && stateError && (
+        <div className="banner bad" role="alert">
+          无法读取核心状态：{stateError}。下面显示的是最后一次读取到的状态。
+        </div>
+      )}
       {install && !install.error && (
         <div className="banner warn" role="status" data-testid="installing">
           正在下载并安装 NyaTunnel {install.version.replace(/^v/, "")}，完成后会自动重启…
@@ -151,8 +161,8 @@ export function App() {
       {state?.notice && (
         <div className="banner warn" role="alert">
           <span className="spacer">{state.notice}</span>
-          {/升级|更新/.test(state.notice) && !install && (
-            <button className="btn sm" onClick={() => installUpdate(update?.latest ?? "")}>立即更新</button>
+          {/升级|更新/.test(state.notice) && !install && update?.newer && (
+            <button className="btn sm" onClick={() => installUpdate(update.latest)}>立即更新</button>
           )}
         </div>
       )}
@@ -182,7 +192,7 @@ export function App() {
           <div className="empty">
             <div className="big">🐱</div>
             <h3>{coreStatus?.state === "error" ? "核心未能启动" : "正在启动 NyaTunnel…"}</h3>
-            <div className="hint">{coreStatus?.state === "error" ? coreStatus.error : "正在启动本地核心服务"}</div>
+            <div className="hint">{coreStatus?.state === "error" ? "正在自动重试，原因见上方提示。" : "正在启动本地核心服务"}</div>
           </div>
         </div>
       </div>
@@ -214,13 +224,17 @@ export function App() {
       {banners}
       <div className="shell">
         <nav className="nav">
-          <div className="logo"><i />NyaTunnel</div>
-          {nav("tunnels", "我的隧道")}
-          {state.canRequest && nav("request", "申请隧道")}
-          {nav("logs", "日志")}
-          {nav("settings", update?.newer ? "设置 · 有新版本" : "设置")}
+          <div className="logo"><img src="/logo.svg" alt="" />NyaTunnel</div>
+          <div className="nav-items">
+            {nav("tunnels", "我的隧道")}
+            {state.canRequest && nav("request", "申请隧道")}
+            {nav("logs", "日志")}
+            {nav("settings", update?.newer ? "设置 · 有新版本" : "设置")}
+          </div>
           <div className="who" data-testid="connection">
-            {state.connected
+            {!running
+              ? <><span className="dot n" />核心未运行</>
+              : state.connected
               ? <><span className="dot ok" />已连接{transportLabel(state.transport) && ` · ${transportLabel(state.transport)}`}</>
               : <><span className="dot warn" />正在连接…</>}
             <br />
@@ -230,7 +244,7 @@ export function App() {
             {!state.connected && state.lastError && <div className="err" style={{ marginTop: 4 }}>{state.lastError}</div>}
           </div>
         </nav>
-        <main className="main">
+        <main className={`main${page.name === "logs" ? " fill" : ""}`}>
           {page.name === "tunnels" && (
             <TunnelList
               state={state}
