@@ -44,8 +44,8 @@ nyatunnel logout                  # 删除本机设备密钥
 镜像 `ghcr.io/stevennight/nyatunnel`（linux/amd64、arm64、arm/v7）。使用宿主机网络，隧道的本地目标 `127.0.0.1:8080` 就是宿主机上的服务：
 
 ```bash
-docker run --rm -it -v nyatunnel:/data ghcr.io/stevennight/nyatunnel enroll https://tunnel.example.com XXXX-XXXX
-docker run -d --name nyatunnel --restart unless-stopped --network host -v nyatunnel:/data ghcr.io/stevennight/nyatunnel
+docker run --rm -it -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel enroll https://tunnel.example.com XXXX-XXXX
+docker run -d --name nyatunnel --restart unless-stopped --network host -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel
 ```
 
 或使用 [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml)。

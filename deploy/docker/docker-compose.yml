@@ -1,19 +1,19 @@
-name: nyatunnel-client
+name: ${NYATUNNEL_PROJECT:-nyatunnel-client}
 
-# 1. Enroll once (interactive):
-#    docker compose run --rm client enroll https://tunnel.example.com XXXX-XXXX
-# 2. Start:
-#    docker compose up -d
+# Headless NyaTunnel client. Copy this file into a deployment directory, then:
+#   1. Enroll once (interactive):  docker compose run --rm client enroll https://tunnel.example.com XXXX-XXXX
+#   2. Start:                      docker compose up -d
+# Settings come from .env next to this file; the device identity lives in ./data (back it up).
 services:
   client:
+    container_name: ${NYATUNNEL_CONTAINER:-nyatunnel-client}
     image: "${NYATUNNEL_IMAGE:-ghcr.io/stevennight/nyatunnel}:${NYATUNNEL_VERSION:-latest}"
     restart: unless-stopped
     # Host networking: tunnel targets such as 127.0.0.1:8080 mean the host's own services.
     network_mode: host
     security_opt:
       - no-new-privileges:true
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - nyatunnel-data:/data
-
-volumes:
-  nyatunnel-data:
+      - ${NYATUNNEL_DATA_DIR:-./data}:/data
