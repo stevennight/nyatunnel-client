@@ -23,13 +23,17 @@ export const notEnrolled: CoreState = {
   connected: false,
   tunnels: [],
   tunnelErrors: {},
+  confirmed: {},
   canRequest: false,
   configRev: 0
 };
 
+/** An enrolled device; its tunnels count as confirmed unless `confirmed` is given. */
 export function enrolled(over: Partial<CoreState> = {}): CoreState {
+  const confirmed = Object.fromEntries((over.tunnels ?? []).map((t) => [t.id, true]));
   return {
     ...notEnrolled,
+    confirmed,
     enrolled: true,
     server: "https://old.example.net",
     deviceId: "dev_1",

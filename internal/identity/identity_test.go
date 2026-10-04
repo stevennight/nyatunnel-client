@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/zalando/go-keyring"
+
+	"nyatunnel-client/internal/store"
 )
 
 func TestSaveLoadRemove(t *testing.T) {
@@ -47,9 +49,18 @@ func TestKeyringStorage(t *testing.T) {
 	if err := SaveUser(dir, &Identity{Server: "https://t.example.com", DeviceID: "dev_k", PrivateKey: priv}); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "identity.json"))
-	if strings.Contains(string(raw), base64.StdEncoding.EncodeToString(priv.Seed())) || !strings.Contains(string(raw), `"keyring"`) {
-		t.Fatalf("key leaked into the file: %s", raw)
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := st.Device()
+	st.Close()
+	if d == nil || d.Key != "" || d.KeyStore != "keyring" {
+		t.Fatalf("key leaked into the database: %+v", d)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, store.FileName))
+	if strings.Contains(string(raw), base64.StdEncoding.EncodeToString(priv.Seed())) {
+		t.Fatal("key found in the database file")
 	}
 	got, err := Load(dir)
 	if err != nil || !got.PrivateKey.Equal(priv) {

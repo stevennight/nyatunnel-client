@@ -15,12 +15,12 @@ const free = tunnel({
 });
 const tcp = tunnel({ id: "ssh-dev", type: "tcp", publicUrl: "t.example.net:22022", localPort: 22, pausedByClient: true });
 
-function renderList(tunnels: Tunnel[], errors: Record<string, string> = {}) {
+function renderList(tunnels: Tunnel[], errors: Record<string, string> = {}, confirmed?: Record<string, boolean>) {
   const onChanged = vi.fn();
   render(
     <ToastProvider>
       <TunnelList
-        state={enrolled({ tunnels, tunnelErrors: errors })}
+        state={enrolled({ tunnels, tunnelErrors: errors, ...(confirmed && { confirmed }) })}
         onDetail={() => {}}
         onRequest={() => {}}
         onChanged={onChanged}
@@ -80,15 +80,58 @@ describe("tunnel list permissions", () => {
   });
 });
 
-function renderDetail(t: Tunnel) {
+function renderDetail(t: Tunnel, confirmed = true) {
   const onChanged = vi.fn();
   render(
     <ToastProvider>
-      <TunnelDetail tunnel={t} logs={[]} onBack={() => {}} onChanged={onChanged} />
+      <TunnelDetail tunnel={t} confirmed={confirmed} logs={[]} onBack={() => {}} onChanged={onChanged} />
     </ToastProvider>
   );
   return { onChanged };
 }
+
+describe("local confirmation", () => {
+  it("flags unconfirmed tunnels and confirms after showing the local target", async () => {
+    const lan = tunnel({ id: "nas", type: "tcp", publicUrl: "t.example.net:24000", localIp: "192.168.1.20", localPort: 5000 });
+    mockCommands({ "POST /v1/tunnels/nas/confirm": enrolled({ tunnels: [lan] }) });
+    const user = userEvent.setup();
+    const { onChanged } = renderList([lan, free], {}, { "demo-share": true });
+    expect(screen.getByTestId("pending-banner")).toHaveTextContent("有 1 条隧道等待你确认");
+    const card = screen.getByTestId("tunnel-nas");
+    expect(within(card).getByText("待确认")).toBeInTheDocument();
+    expect(within(screen.getByTestId("tunnel-demo-share")).queryByText("待确认")).toBeNull();
+
+    await user.click(within(card).getByRole("button", { name: "确认接通…" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("192.168.1.20:5000");
+    expect(dialog).toHaveTextContent("t.example.net:24000");
+    await user.click(within(dialog).getByRole("button", { name: "确认接通" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(coreCalls()).toEqual([{ key: "POST /v1/tunnels/nas/confirm", body: null }]);
+  });
+
+  it("shows nothing to confirm when every tunnel is confirmed", () => {
+    renderList([free]);
+    expect(screen.queryByTestId("pending-banner")).toBeNull();
+  });
+
+  it("can withdraw a confirmation from the detail page", async () => {
+    mockCommands({ "POST /v1/tunnels/demo-share/unconfirm": enrolled({ tunnels: [free], confirmed: {} }) });
+    const user = userEvent.setup();
+    const { onChanged } = renderDetail(free);
+    expect(screen.queryByTestId("confirm-box")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "撤销确认" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(coreCalls()).toEqual([{ key: "POST /v1/tunnels/demo-share/unconfirm", body: null }]);
+  });
+
+  it("asks for confirmation on the detail page of an unconfirmed tunnel", () => {
+    renderDetail(free, false);
+    expect(screen.getByTestId("confirm-box")).toHaveTextContent("127.0.0.1:3000");
+    expect(screen.queryByTestId("confirmed-note")).toBeNull();
+  });
+});
 
 describe("tunnel detail local target", () => {
   it("hides the editor when editLocal is false", () => {

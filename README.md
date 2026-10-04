@@ -4,6 +4,8 @@ NyaTunnel 的客户端：把本机注册到 NyaTunnel 服务器，运行分配�
 
 客户端**不能自行添加隧道**：所有对外入口由管理员在服务端后台定义，配置通过加密的控制通道实时下发；用户只能做管理员授权的操作（暂停 / 启用、修改本地端口、申请新隧道）。
 
+反过来，**服务端也不能单方面打开本机的端口**：下发的隧道要在本机确认后才会接通，确认绑定隧道的类型和本地目标，管理员之后修改其中任何一项都要重新确认（[协议 §4.6](https://github.com/stevennight/nyatunnel-server/blob/main/docs/协议.md#46-设备端确认)）。这样即使服务器或管理员账号被攻破，入侵者也没法借这台设备暴露你没同意过的地址。桌面版在“我的隧道”里确认；命令行用 `nyatunnel tunnels confirm`。
+
 ## 仓库关系
 
 NyaTunnel 由三个独立仓库组成，通过服务端仓库的 `docs/协议.md` 对接，协议实现在公共库里：
@@ -21,6 +23,7 @@ NyaTunnel 由三个独立仓库组成，通过服务端仓库的 `docs/协议.md
 | `internal/daemon` | 供 GUI 使用的本机回环接口 |
 | `internal/service` | 系统服务（Windows 服务 / systemd / launchd） |
 | `internal/identity` | 设备身份；私钥优先存系统钥匙串 |
+| `internal/store` | 本地数据库 `nyatunnel.db`（SQLite）：设备身份、直连端点、隧道确认记录、最近一次配置 |
 | `internal/update` | 自更新：CLI 与桌面安装包，都先核对 Release 的 `SHA256SUMS` |
 | `gui/` | Tauri 2 + React 桌面程序，Go 核心作为 sidecar 打包 |
 
@@ -30,6 +33,10 @@ NyaTunnel 由三个独立仓库组成，通过服务端仓库的 `docs/协议.md
 nyatunnel enroll <服务器> <注册码> [--name 设备名] [--yes]   # 或 nyatunnel enroll "nyatunnel://enroll?…"
 nyatunnel run                     # 前台运行（Ctrl+C 退出）
 nyatunnel status                  # 注册信息与隧道（只读查询，不影响正在运行的会话）
+nyatunnel tunnels                 # 隧道列表及是否已在本机确认（连不上服务器时显示上次收到的配置）
+nyatunnel tunnels confirm <ID 或名称> [--yes]   # 核对本地目标后确认，确认后才接通
+nyatunnel tunnels revoke <ID 或名称>            # 撤销确认，立即停止转发
+                                  # 以上三条加 --service 则操作系统服务的设备（需要管理员 / root）
 nyatunnel service install         # 安装为系统服务，开机即运行（需要管理员 / root）
 nyatunnel service uninstall [--purge]
 nyatunnel service status          # 含自动更新开关与上次自动更新的结果
@@ -38,7 +45,7 @@ nyatunnel update [--check]        # 从 GitHub Releases 更新
 nyatunnel logout                  # 删除本机设备密钥
 ```
 
-配置目录默认为系统的用户配置目录下的 `NyaTunnel`，可用 `NYATUNNEL_HOME` 指定。安装为系统服务后，设备身份移到 `%ProgramData%\NyaTunnel`（Windows）、`/etc/nyatunnel`（Linux）或 `/Library/Application Support/NyaTunnel`（macOS），仅管理员 / root 可读。Windows 上服务运行的是复制到 `%ProgramData%\NyaTunnel\bin` 的程序（同样只有管理员可改），与桌面版的安装目录互不影响。
+配置目录默认为系统的用户配置目录下的 `NyaTunnel`，可用 `NYATUNNEL_HOME` 指定，本地状态都在其中的 `nyatunnel.db`。旧版本的 `identity.json` / `direct.json` 会在新版本首次启动时自动导入，第一次成功连上服务器后删除（自动更新失败回滚时旧版本仍能用）；升级前已经在运行的隧道视为已确认，之后新增或改动的隧道需要确认。安装为系统服务后，设备身份（连同已确认的隧道）移到 `%ProgramData%\NyaTunnel`（Windows）、`/etc/nyatunnel`（Linux）或 `/Library/Application Support/NyaTunnel`（macOS），仅管理员 / root 可读。Windows 上服务运行的是复制到 `%ProgramData%\NyaTunnel\bin` 的程序（同样只有管理员可改），与桌面版的安装目录互不影响。
 
 Windows 系统服务会自己更新：启动 1 分钟后和之后每 6 小时检查一次（服务器要求升级时立即检查），下载 CLI 并核对 `SHA256SUMS`，再交给一个从副本运行的更新程序：停止服务、替换程序、启动服务，等新版本报告“已启动”（之前在线的还要“已重新连上服务器”）。两分钟内没有做到就换回旧程序并重新启动服务。全程以 SYSTEM 运行，不需要有人登录，也不会弹出 UAC。日志在 `%ProgramData%\NyaTunnel\update.log`，失败的版本一天内不再自动重试。
 
@@ -49,7 +56,11 @@ Windows 系统服务会自己更新：启动 1 分钟后和之后每 6 小时检
 ```bash
 docker run --rm -it -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel enroll https://tunnel.example.com XXXX-XXXX
 docker run -d --name nyatunnel --restart unless-stopped --network host -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel
+docker run --rm -it --network host -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel tunnels            # 查看待确认的隧道
+docker run --rm -it --network host -v "$PWD/data:/data" ghcr.io/stevennight/nyatunnel tunnels confirm <ID>
 ```
+
+隧道要确认后才会接通；正在运行的容器几秒内就会读到确认结果。
 
 或使用 [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml)。
 
@@ -71,7 +82,7 @@ go run ./cmd/nyatunnel link "nyatunnel://enroll?v=1&s=tunnel.example.net&c=K7QP-
 - 启动时以 `nyatunnel daemon --gui --exit-with-stdin` 拉起核心，环境变量 `NYATUNNEL_IPC_TOKEN` 为每次随机生成的令牌；核心在 stdout 打印 `{"event":"ready","addr":…}` 后，界面的所有请求都经 Rust 命令 `core` 转发并附上令牌——令牌不进入网页。核心异常退出时自动退避重启，界面顶部显示提示。
 - 关闭窗口最小化到托盘（菜单：显示窗口 / 退出），退出时先请求核心正常关闭。
 - 深链 `nyatunnel://enroll?…` 只会打开确认对话框：先向服务器取回预览（服务器、邀请人、将获得的隧道），用户点“确认加入”后才生成密钥并注册；首次连接的服务器和会切换服务器的链接都有醒目提示。`nyatunnel://open?…` 只聚焦窗口并定位隧道。第二个实例（Windows / Linux 点击链接时）会把链接交给已运行的实例。
-- 页面：首次启动、我的隧道、隧道详情、申请隧道、日志、设置；核心以系统服务运行时显示“本机由系统服务运行”。
+- 页面：首次启动、我的隧道、隧道详情、申请隧道、日志、设置；核心以系统服务运行时显示“本机由系统服务运行”。未确认的隧道在列表顶部提示，确认对话框列出类型、公网入口、本地目标与访问策略；详情页可以撤销确认。
 - 自动更新（设置里可关闭，默认开启）：启动时和每 6 小时检查一次 GitHub Releases，发现新版本就由核心下载本平台的安装包并核对 `SHA256SUMS`（`POST /v1/update/download`，只写入系统临时目录下的 `NyaTunnel-update`），再由 Rust 命令 `install_update` 校验路径后安装：
   - Windows：全程无人值守，界面只负责启动更新程序后退出。更新程序是捆绑的 `nyatunnel.exe` 的副本，从安装目录以外运行（`nyatunnel update apply --mode gui`），步骤如下：
     1. 等界面退出，并结束安装目录里仍在运行的进程。

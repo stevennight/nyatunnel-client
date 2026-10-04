@@ -17,12 +17,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/stevennight/nyatunnel-common/deeplink"
+	"github.com/stevennight/nyatunnel-common/tunnelproto"
 
 	"nyatunnel-client/internal/agent"
 	"nyatunnel-client/internal/daemon"
@@ -31,6 +33,7 @@ import (
 	"nyatunnel-client/internal/logbuf"
 	"nyatunnel-client/internal/service"
 	"nyatunnel-client/internal/shared/version"
+	"nyatunnel-client/internal/store"
 	"nyatunnel-client/internal/update"
 )
 
@@ -42,6 +45,12 @@ const usage = `用法: nyatunnel <命令> [参数]
   enroll <nyatunnel://…>     用邀请链接注册
   run                        连接服务器并运行分配给本机的隧道（前台运行，Ctrl+C 退出）
   status                     显示本机注册信息与隧道
+  tunnels [--service]        列出分配给本机的隧道及是否已在本机确认
+  tunnels confirm <隧道> [--service] [--yes]
+                             确认隧道（ID 或名称）：只有确认过的隧道才会接通，
+                             管理员改动其类型或本地目标后需要重新确认
+  tunnels revoke <隧道> [--service]
+                             撤销确认，本机立即停止转发该隧道
   logout                     删除本机的设备密钥（服务器上的设备需由管理员吊销）
   link <nyatunnel://…>       解析并校验一个深链
   daemon                     供图形界面使用的后台模式（本机回环 HTTP 接口）
@@ -52,6 +61,8 @@ const usage = `用法: nyatunnel <命令> [参数]
   service update             立即把系统服务更新到最新版本（失败自动恢复，仅 Windows）
   update [--check]           检查并安装新版本（从 GitHub Releases 下载并校验 SHA256SUMS）
   version                    显示版本
+
+--service 操作系统服务使用的设备（需要管理员 / root）。
 
 环境变量:
   NYATUNNEL_HOME             配置目录（默认为系统的用户配置目录下的 NyaTunnel）
@@ -82,6 +93,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdRun(stderr)
 	case "status":
 		return cmdStatus(stdout, stderr)
+	case "tunnels":
+		return cmdTunnels(rest, stdin, stdout, stderr)
 	case "logout":
 		return cmdLogout(stdout, stderr)
 	case "daemon":
@@ -225,6 +238,7 @@ func cmdEnroll(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "注册成功：设备 %s（%s）。运行 `nyatunnel run` 开始工作。\n", deviceID, id.Fingerprint())
+	fmt.Fprintln(stdout, "分配给本机的隧道需要先用 `nyatunnel tunnels confirm <隧道>` 确认才会接通。")
 	return 0
 }
 
@@ -259,7 +273,13 @@ func cmdRun(stderr io.Writer) int {
 // runAgent runs the device until ctx ends; the exit code tells service managers what happened
 // (3: revoked, do not restart).
 func runAgent(ctx context.Context, dir string, id *identity.Identity, log *slog.Logger) int {
-	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log, Dir: dir})
+	st, err := store.Open(dir)
+	if err != nil {
+		log.Error("cannot open the local database", "err", err)
+		return 1
+	}
+	defer st.Close()
+	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log, Store: st})
 	// running.json tells an updater that this version started and connected.
 	go update.TrackHealth(ctx, dir, version.Version, a.Watch(), func(s agent.State) bool { return s.Connected })
 	go func() {
@@ -274,9 +294,10 @@ func runAgent(ctx context.Context, dir string, id *identity.Identity, log *slog.
 			}
 		}
 	}()
-	err := a.Run(ctx)
+	err = a.Run(ctx)
 	switch {
 	case errors.Is(err, agent.ErrRevoked):
+		st.Close()
 		_ = identity.Remove(dir)
 		log.Error("服务器拒绝了本设备（已被吊销或所属账号被禁用），已删除本机密钥")
 		return 3
@@ -296,22 +317,55 @@ func cmdStatus(stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "服务器:   %s\n设备:     %s（%s）\n密钥指纹: %s\n配置目录: %s\n\n", id.Server, id.DeviceName, id.DeviceID, id.Fingerprint(), dir)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	cfg, err := agent.New(agent.Options{Identity: id, Version: version.Version}).Once(ctx)
+	st, err := store.Open(dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer st.Close()
+	cfg, err := fetchConfig(st, id, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "连接服务器失败:", err)
 		return 1
 	}
+	printTunnels(stdout, st, cfg)
+	return 0
+}
+
+// fetchConfig asks the server for the current configuration (a probe session that never displaces
+// a running device) and falls back to the last one stored locally when the server is unreachable.
+func fetchConfig(st *store.Store, id *identity.Identity, stderr io.Writer) (*tunnelproto.Config, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cfg, err := agent.New(agent.Options{Identity: id, Version: version.Version, Store: st}).Once(ctx)
+	if err == nil {
+		return cfg, nil
+	}
+	if errors.Is(err, agent.ErrRevoked) {
+		return nil, err
+	}
+	last, at, lerr := st.LastConfig()
+	if lerr != nil || last == nil {
+		return nil, err
+	}
+	fmt.Fprintf(stderr, "无法连接服务器（%v），以下是 %s 收到的配置。\n", err, at.Local().Format("2006-01-02 15:04"))
+	return last, nil
+}
+
+func printTunnels(stdout io.Writer, st *store.Store, cfg *tunnelproto.Config) {
 	if len(cfg.Tunnels) == 0 {
 		fmt.Fprintln(stdout, "没有分配给本机的隧道。")
-		return 0
+		return
 	}
+	confirms, _ := st.Confirmations()
 	tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "名称\t公网地址\t本地目标\t状态")
+	fmt.Fprintln(tw, "名称\tID\t类型\t本地目标\t公网地址\t状态")
 	now := time.Now()
-	for _, t := range cfg.Tunnels {
-		state := "启用"
+	pending := 0
+	for i := range cfg.Tunnels {
+		t := &cfg.Tunnels[i]
+		c, ok := confirms[t.ID]
+		state := "运行中"
 		switch {
 		case !t.Enabled:
 			state = "已被管理员停用"
@@ -320,9 +374,138 @@ func cmdStatus(stdout, stderr io.Writer) int {
 		case t.PausedByClient:
 			state = "已暂停"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s:%d\t%s\n", t.Name, t.PublicURL, t.LocalIP, t.LocalPort, state)
+		switch {
+		case ok && c.Covers(t):
+		case ok:
+			state = "待确认（管理员已修改，原确认为 " + net.JoinHostPort(c.LocalIP, strconv.Itoa(c.LocalPort)) + "）"
+			pending++
+		default:
+			state = "待确认"
+			pending++
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", t.Name, t.ID, t.Type, net.JoinHostPort(t.LocalIP, strconv.Itoa(t.LocalPort)), t.PublicURL, state)
 	}
 	tw.Flush()
+	if pending > 0 {
+		fmt.Fprintln(stdout, "\n待确认的隧道不会接通。核对本地目标后运行 `nyatunnel tunnels confirm <ID 或名称>`。")
+	}
+}
+
+// cmdTunnels lists the tunnels, or confirms / revokes one of them (协议.md §4.6).
+func cmdTunnels(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("tunnels", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	svc := fs.Bool("service", false, "操作系统服务使用的设备")
+	yes := fs.Bool("yes", false, "不询问，直接确认")
+	var positional []string
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return 2
+		}
+		args = fs.Args()
+		if len(args) > 0 {
+			positional = append(positional, args[0])
+			args = args[1:]
+		}
+	}
+	action := "list"
+	if len(positional) > 0 {
+		action = positional[0]
+	}
+	if (action == "list" && len(positional) > 1) || (action != "list" && len(positional) != 2) ||
+		(action != "list" && action != "confirm" && action != "revoke") {
+		fmt.Fprintln(stderr, "用法: nyatunnel tunnels [confirm|revoke <隧道>] [--service] [--yes]")
+		return 2
+	}
+
+	dir := service.SystemDir()
+	if !*svc {
+		var ok bool
+		if dir, ok = configDir(stderr); !ok {
+			return 1
+		}
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		if *svc {
+			fmt.Fprintln(stderr, "无法打开系统服务的数据（需要管理员 / root）:", err)
+		} else {
+			fmt.Fprintln(stderr, err)
+		}
+		return 1
+	}
+	defer st.Close()
+	id, err := identity.FromStore(st)
+	if errors.Is(err, identity.ErrNotEnrolled) {
+		if *svc {
+			fmt.Fprintln(stderr, "系统服务没有设备身份。")
+		} else {
+			fmt.Fprintln(stderr, "本机尚未注册，请先运行 `nyatunnel enroll <服务器> <注册码>`（系统服务的隧道请加 --service）。")
+		}
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	cfg, err := fetchConfig(st, id, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "连接服务器失败:", err)
+		return 1
+	}
+	if action == "list" {
+		printTunnels(stdout, st, cfg)
+		return 0
+	}
+
+	var t *tunnelproto.Tunnel
+	matches := 0
+	for i := range cfg.Tunnels {
+		if cfg.Tunnels[i].ID == positional[1] {
+			t, matches = &cfg.Tunnels[i], 1
+			break
+		}
+		if cfg.Tunnels[i].Name == positional[1] {
+			t = &cfg.Tunnels[i]
+			matches++
+		}
+	}
+	switch {
+	case matches == 0:
+		fmt.Fprintf(stderr, "本机没有隧道 %q。运行 `nyatunnel tunnels` 查看。\n", positional[1])
+		return 1
+	case matches > 1:
+		fmt.Fprintf(stderr, "有多个隧道叫 %q，请改用 ID。\n", positional[1])
+		return 1
+	}
+
+	target := net.JoinHostPort(t.LocalIP, strconv.Itoa(t.LocalPort))
+	if action == "revoke" {
+		if err := st.Unconfirm(t.ID); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "已撤销 %s 的确认，本机不再转发它（正在运行的客户端几秒内生效）。\n", t.Name)
+		return 0
+	}
+	fmt.Fprintf(stdout, "隧道:     %s（%s）\n类型:     %s\n本地目标: %s\n公网地址: %s\n", t.Name, t.ID, t.Type, target, t.PublicURL)
+	if t.Display.AccessPolicy != "" {
+		fmt.Fprintf(stdout, "访问策略: %s\n", t.Display.AccessPolicy)
+	}
+	fmt.Fprintf(stdout, "确认后，访问上面的公网地址即可连到本机能访问的 %s。\n", target)
+	if !*yes {
+		fmt.Fprint(stdout, "确认接通？[y/N] ")
+		line, _ := bufio.NewReader(stdin).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+			fmt.Fprintln(stdout, "已取消。")
+			return 1
+		}
+	}
+	if err := st.Confirm(store.ConfirmationFor(t)); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "已确认 %s（正在运行的客户端几秒内生效）。\n", t.Name)
 	return 0
 }
 
@@ -548,6 +731,10 @@ func cmdService(args []string, stdout, stderr io.Writer) int {
 			_ = service.Uninstall(false)
 			return 1
 		}
+		// Tunnels confirmed here stay confirmed for the service.
+		if err := copyConfirmations(dir, service.SystemDir()); err != nil {
+			fmt.Fprintln(stderr, "警告：未能带上已确认的隧道，请用 `nyatunnel tunnels --service` 重新确认:", err)
+		}
 		if err := identity.Remove(dir); err != nil {
 			fmt.Fprintln(stderr, "警告：无法删除用户目录中的密钥:", err)
 		}
@@ -636,6 +823,20 @@ func cmdService(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "未知子命令 %q\n", args[0])
 		return 2
 	}
+}
+
+func copyConfirmations(from, to string) error {
+	src, err := store.Open(from)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := store.Open(to)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	return src.CopyConfirmations(dst)
 }
 
 func runAsService(stderr io.Writer) int {

@@ -24,6 +24,7 @@ import (
 	"github.com/stevennight/nyatunnel-common/tunnelproto"
 
 	"nyatunnel-client/internal/identity"
+	"nyatunnel-client/internal/store"
 )
 
 // Fatal errors end Run: the device must not keep reconnecting.
@@ -43,6 +44,9 @@ type State struct {
 	Config    *tunnelproto.Config
 	// TunnelErrors holds the last local error per tunnel id (e.g. local service unreachable).
 	TunnelErrors map[string]string
+	// Confirmed says per tunnel id whether the device owner confirmed the tunnel's current local
+	// target (协议.md §4.6); unconfirmed tunnels are refused.
+	Confirmed map[string]bool
 }
 
 // Agent runs a device.
@@ -52,10 +56,11 @@ type Agent struct {
 	gui     bool
 	log     *slog.Logger
 	dial    func(ctx context.Context, url string, opts *websocket.DialOptions) (*websocket.Conn, error)
-	dir     string // remembers the direct endpoint; "" = never persisted
+	store   *store.Store // nil: nothing is persisted and no tunnel is confirmed
 
-	direct      *identity.Direct
+	direct      *store.Direct
 	directAfter time.Time // do not retry the direct path before this
+	legacy      bool      // legacy files may still be around (dropped after the first connection)
 
 	mu       sync.Mutex
 	state    State
@@ -64,6 +69,7 @@ type Agent struct {
 	watchers []chan State
 	nextID   atomic.Int64
 	stats    map[string]*counter
+	confirms map[string]store.Confirmation
 }
 
 type counter struct {
@@ -77,8 +83,9 @@ type Options struct {
 	Version  string
 	GUI      bool
 	Log      *slog.Logger
-	// Dir is the identity directory, where the direct endpoint is remembered (optional).
-	Dir string
+	// Store keeps the direct endpoint, the confirmations and the last configuration. Without it
+	// the agent persists nothing and serves no tunnel (every tunnel counts as unconfirmed).
+	Store *store.Store
 }
 
 // New returns an agent; call Run.
@@ -88,15 +95,20 @@ func New(o Options) *Agent {
 	}
 	a := &Agent{
 		id: o.Identity, version: o.Version, gui: o.GUI, log: o.Log, pending: map[string]chan tunnelproto.Result{},
-		stats: map[string]*counter{}, state: State{TunnelErrors: map[string]string{}}, dir: o.Dir,
+		stats: map[string]*counter{}, state: State{TunnelErrors: map[string]string{}, Confirmed: map[string]bool{}}, store: o.Store,
+		confirms: map[string]store.Confirmation{},
 		dial: func(ctx context.Context, u string, opts *websocket.DialOptions) (*websocket.Conn, error) {
 			opts.HTTPHeader = map[string][]string{"User-Agent": {"nyatunnel/" + o.Version}}
 			c, _, err := websocket.Dial(ctx, u, opts)
 			return c, err
 		},
 	}
-	if o.Dir != "" {
-		a.direct = identity.LoadDirect(o.Dir)
+	if o.Store != nil {
+		a.direct = o.Store.Direct()
+		a.legacy = true
+		if cs, err := o.Store.Confirmations(); err == nil {
+			a.confirms = cs
+		}
 	}
 	return a
 }
@@ -113,6 +125,10 @@ func (a *Agent) snapshot() State {
 	s.TunnelErrors = make(map[string]string, len(a.state.TunnelErrors))
 	for k, v := range a.state.TunnelErrors {
 		s.TunnelErrors[k] = v
+	}
+	s.Confirmed = make(map[string]bool, len(a.state.Confirmed))
+	for k, v := range a.state.Confirmed {
+		s.Confirmed[k] = v
 	}
 	return s
 }
@@ -147,6 +163,9 @@ func (a *Agent) setState(f func(s *State)) {
 
 // Run connects and reconnects until ctx ends or the server refuses the device for good.
 func (a *Agent) Run(ctx context.Context) error {
+	if a.store != nil {
+		go a.watchConfirmations(ctx)
+	}
 	backoff := time.Second
 	for {
 		started := time.Now()
@@ -229,9 +248,9 @@ func (a *Agent) connect(ctx context.Context) (*websocket.Conn, string, error) {
 
 // rememberDirect stores the server's direct endpoint from a configuration snapshot.
 func (a *Agent) rememberDirect(ep *tunnelproto.DirectEndpoint) {
-	var d *identity.Direct
+	var d *store.Direct
 	if ep != nil && ep.Addr != "" && len(ep.CertSHA256) == 64 {
-		d = &identity.Direct{Addr: ep.Addr, CertSHA256: ep.CertSHA256}
+		d = &store.Direct{Addr: ep.Addr, CertSHA256: ep.CertSHA256}
 	}
 	a.mu.Lock()
 	same := (a.direct == nil && d == nil) || (a.direct != nil && d != nil && *a.direct == *d)
@@ -239,8 +258,8 @@ func (a *Agent) rememberDirect(ep *tunnelproto.DirectEndpoint) {
 		a.direct, a.directAfter = d, time.Time{}
 	}
 	a.mu.Unlock()
-	if !same && a.dir != "" {
-		if err := identity.SaveDirect(a.dir, d); err != nil {
+	if !same && a.store != nil {
+		if err := a.store.SetDirect(d); err != nil {
 			a.log.Warn("cannot remember the direct endpoint", "err", err)
 		}
 	}
@@ -298,6 +317,11 @@ func (a *Agent) session(ctx context.Context, firstConfig chan<- *tunnelproto.Con
 	a.changed()
 	a.mu.Unlock()
 	a.log.Info("connected", "server", a.id.Server, "device", a.id.DeviceID, "transport", transport)
+	if a.store != nil && a.legacy && firstConfig == nil {
+		// This version works: an update will not be rolled back to one that needs the old files.
+		a.store.DropLegacy()
+		a.legacy = false
+	}
 	defer func() {
 		a.mu.Lock()
 		if a.ctl == ctl {
@@ -372,8 +396,23 @@ func (a *Agent) readControl(ctl *tunnelproto.Control, firstConfig chan<- *tunnel
 
 func (a *Agent) applyConfig(cfg *tunnelproto.Config) {
 	a.rememberDirect(cfg.Direct)
+	var confirms map[string]store.Confirmation
+	if a.store != nil {
+		if err := a.store.ApplyConfig(cfg); err != nil {
+			a.log.Warn("cannot store the configuration", "err", err)
+		}
+		if cs, err := a.store.Confirmations(); err == nil {
+			confirms = cs
+		} else {
+			a.log.Warn("cannot read tunnel confirmations", "err", err)
+		}
+	}
 	a.setState(func(s *State) {
+		if confirms != nil {
+			a.confirms = confirms
+		}
 		s.Config = cfg
+		a.recomputeConfirmed()
 		for id := range s.TunnelErrors {
 			found := false
 			for _, t := range cfg.Tunnels {
@@ -385,18 +424,133 @@ func (a *Agent) applyConfig(cfg *tunnelproto.Config) {
 		}
 	})
 	a.log.Info("configuration applied", "rev", cfg.Rev, "tunnels", len(cfg.Tunnels))
+	a.logUnconfirmed()
+}
+
+// recomputeConfirmed refreshes State.Confirmed; a.mu must be held.
+func (a *Agent) recomputeConfirmed() {
+	a.state.Confirmed = map[string]bool{}
+	if a.state.Config == nil {
+		return
+	}
+	for i := range a.state.Config.Tunnels {
+		t := &a.state.Config.Tunnels[i]
+		c, ok := a.confirms[t.ID]
+		a.state.Confirmed[t.ID] = ok && c.Covers(t)
+	}
+}
+
+// logUnconfirmed tells whoever reads the log which tunnels wait for the device owner.
+func (a *Agent) logUnconfirmed() {
+	a.mu.Lock()
+	var names []string
+	if a.state.Config != nil {
+		for _, t := range a.state.Config.Tunnels {
+			if !a.state.Confirmed[t.ID] {
+				names = append(names, fmt.Sprintf("%s（%s，本地 %s）", t.Name, t.ID, net.JoinHostPort(t.LocalIP, strconv.Itoa(t.LocalPort))))
+			}
+		}
+	}
+	a.mu.Unlock()
+	if len(names) > 0 {
+		a.log.Warn("有隧道等待本机确认，确认前不会接通", "tunnels", strings.Join(names, "、"))
+	}
+}
+
+// confirmPoll is how often confirmations made by another process (the CLI next to a service) are
+// picked up.
+var confirmPoll = 2 * time.Second
+
+// watchConfirmations reloads the confirmations until ctx ends.
+func (a *Agent) watchConfirmations(ctx context.Context) {
+	t := time.NewTicker(confirmPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		_ = a.reloadConfirmations()
+	}
+}
+
+// setConfirmations installs cs and, when that changes what is served, updates the state and
+// reports the tunnels to the server.
+func (a *Agent) setConfirmations(cs map[string]store.Confirmation) {
+	a.mu.Lock()
+	before := a.state.Confirmed
+	a.confirms = cs
+	a.recomputeConfirmed()
+	changed := len(before) != len(a.state.Confirmed)
+	for id, v := range a.state.Confirmed {
+		changed = changed || before[id] != v
+	}
+	ctl, cfg := a.ctl, a.state.Config
+	if changed {
+		a.changed()
+	}
+	a.mu.Unlock()
+	if changed && ctl != nil && cfg != nil {
+		a.reportStatus(ctl, cfg)
+	}
+}
+
+// ErrUnknownTunnel means the tunnel is not in the current configuration.
+var ErrUnknownTunnel = errors.New("no such tunnel on this device")
+
+// Confirm records that the device owner agrees to serve tunnel id with its current type and local
+// target; a later change of either needs a new confirmation.
+func (a *Agent) Confirm(id string) error {
+	t, ok := a.tunnel(id)
+	if !ok {
+		return ErrUnknownTunnel
+	}
+	return a.confirm(store.ConfirmationFor(&t))
+}
+
+func (a *Agent) confirm(c store.Confirmation) error {
+	if a.store == nil {
+		return errors.New("no local database")
+	}
+	if err := a.store.Confirm(c); err != nil {
+		return err
+	}
+	return a.reloadConfirmations()
+}
+
+// Unconfirm withdraws the confirmation of tunnel id: the device stops serving it.
+func (a *Agent) Unconfirm(id string) error {
+	if a.store == nil {
+		return errors.New("no local database")
+	}
+	if err := a.store.Unconfirm(id); err != nil {
+		return err
+	}
+	return a.reloadConfirmations()
+}
+
+func (a *Agent) reloadConfirmations() error {
+	cs, err := a.store.Confirmations()
+	if err != nil {
+		return err
+	}
+	a.setConfirmations(cs)
+	return nil
 }
 
 func (a *Agent) reportStatus(ctl *tunnelproto.Control, cfg *tunnelproto.Config) {
 	now := time.Now()
 	a.mu.Lock()
-	errs := a.state.TunnelErrors
+	errs, confirmed := a.state.TunnelErrors, a.state.Confirmed
 	statuses := make([]tunnelproto.Status, 0, len(cfg.Tunnels))
 	for _, t := range cfg.Tunnels {
 		st := tunnelproto.Status{TunnelID: t.ID, State: tunnelproto.StateRunning}
 		switch {
 		case !t.Active(now):
 			st.State = tunnelproto.StatePaused
+		case !confirmed[t.ID]:
+			st.State = tunnelproto.StateUnconfirmed
 		case errs[t.ID] != "":
 			st.State, st.Error = tunnelproto.StateError, errs[t.ID]
 		}
@@ -426,6 +580,7 @@ func (a *Agent) tunnel(id string) (tunnelproto.Tunnel, bool) {
 func (a *Agent) tunnelError(id, msg string) {
 	a.mu.Lock()
 	changed := a.state.TunnelErrors[id] != msg
+	confirmed := a.state.Confirmed[id]
 	if msg == "" {
 		delete(a.state.TunnelErrors, id)
 	} else {
@@ -436,7 +591,7 @@ func (a *Agent) tunnelError(id, msg string) {
 		a.changed()
 	}
 	a.mu.Unlock()
-	if changed && ctl != nil {
+	if changed && ctl != nil && confirmed {
 		st := tunnelproto.Status{TunnelID: id, State: tunnelproto.StateRunning}
 		if msg != "" {
 			st.State, st.Error = tunnelproto.StateError, msg
@@ -455,14 +610,30 @@ func (a *Agent) acceptStreams(mux *tunnelproto.Session) {
 	}
 }
 
-// localAllowed re-checks the loopback rule on the device: the server enforces it too, but the
-// device never dials outside what its own copy of the permissions allows.
+// localAllowed re-checks the target on the device: an IP address (or "localhost", never another
+// host name that DNS could point anywhere), not unspecified or multicast, and loopback when the
+// permissions say so. The server enforces the same, but the device does not rely on it.
 func localAllowed(t *tunnelproto.Tunnel) bool {
-	if !t.Permissions.LoopbackOnly || t.LocalIP == "localhost" {
+	if t.LocalIP == "localhost" {
 		return true
 	}
 	ip, err := netip.ParseAddr(t.LocalIP)
-	return err == nil && ip.Unmap().IsLoopback()
+	if err != nil || ip.Zone() != "" {
+		return false
+	}
+	ip = ip.Unmap()
+	if ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return !t.Permissions.LoopbackOnly || ip.IsLoopback()
+}
+
+// confirmed reports whether the owner confirmed t as it is now.
+func (a *Agent) confirmed(t *tunnelproto.Tunnel) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c, ok := a.confirms[t.ID]
+	return ok && c.Covers(t)
 }
 
 func (a *Agent) serveStream(s *yamux.Stream) {
@@ -480,6 +651,9 @@ func (a *Agent) serveStream(s *yamux.Stream) {
 		return
 	case !t.Active(time.Now()):
 		tunnelproto.WriteStreamReply(s, tunnelproto.ReplyInactive)
+		return
+	case !a.confirmed(&t):
+		tunnelproto.WriteStreamReply(s, tunnelproto.ReplyUnconfirmed)
 		return
 	case !localAllowed(&t):
 		tunnelproto.WriteStreamReply(s, tunnelproto.ReplyForbidden)
@@ -616,9 +790,26 @@ func relayUDP(stream *yamux.Stream, local net.Conn, c *counter) {
 // ErrOffline means there is no session to send a request on.
 var ErrOffline = errors.New("not connected to the server")
 
-// Update asks the server to change a tunnel (local target or pause) and waits for its answer.
+// Update asks the server to change a tunnel (local target or pause) and waits for its answer. A
+// local target the device owner sets here counts as confirmed.
 func (a *Agent) Update(ctx context.Context, u tunnelproto.TunnelUpdate) error {
-	return a.call(ctx, tunnelproto.TypeTunnelUpdate, u)
+	t, known := a.tunnel(u.TunnelID)
+	if err := a.call(ctx, tunnelproto.TypeTunnelUpdate, u); err != nil {
+		return err
+	}
+	if known && (u.LocalIP != nil || u.LocalPort != nil) && a.store != nil {
+		c := store.ConfirmationFor(&t)
+		if u.LocalIP != nil {
+			c.LocalIP = *u.LocalIP
+		}
+		if u.LocalPort != nil {
+			c.LocalPort = *u.LocalPort
+		}
+		if err := a.confirm(c); err != nil {
+			a.log.Warn("cannot confirm the new local target", "tunnel", t.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 // Request files a tunnel request with the administrators.

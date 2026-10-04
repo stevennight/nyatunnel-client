@@ -1,38 +1,36 @@
-// Package identity stores this device's enrollment: the server it belongs to, its device id and its
-// Ed25519 private key. The key never leaves the device.
+// Package identity is this device's enrollment: the server it belongs to, its device id and its
+// Ed25519 private key. The key never leaves the device. It is kept in the local database (package
+// store), with the private key in the OS keychain where there is one.
 package identity
 
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/stevennight/nyatunnel-common/deeplink"
 	"github.com/zalando/go-keyring"
+
+	"nyatunnel-client/internal/store"
 )
 
 // Identity is an enrolled device.
 type Identity struct {
 	// Server is the public URL, e.g. https://tunnel.example.com.
-	Server     string             `json:"server"`
-	DeviceID   string             `json:"deviceId"`
-	DeviceName string             `json:"deviceName"`
-	PrivateKey ed25519.PrivateKey `json:"-"`
-	Key        string             `json:"privateKey,omitempty"` // base64 seed when stored in the file
-	// KeyStore is "keyring" when the seed lives in the OS keychain, "" when it is in the file.
-	KeyStore string `json:"keyStore,omitempty"`
+	Server     string
+	DeviceID   string
+	DeviceName string
+	PrivateKey ed25519.PrivateKey
+	// KeyStore is "keyring" when the seed lives in the OS keychain, "" when it is in the database.
+	KeyStore string
 }
 
 const keyringService = "NyaTunnel"
-
-func (id *Identity) keyringAccount() string { return id.DeviceID }
 
 // Host is the server host the device signs for.
 func (id *Identity) Host() (string, error) { return deeplink.ServerHost(id.Server) }
@@ -43,7 +41,7 @@ func (id *Identity) Fingerprint() string {
 	return "ed25519:" + base64.RawStdEncoding.EncodeToString(pub)[:16]
 }
 
-// ErrNotEnrolled means there is no identity file.
+// ErrNotEnrolled means no device is stored.
 var ErrNotEnrolled = errors.New("this device is not enrolled")
 
 // Dir returns the configuration directory: $NYATUNNEL_HOME, or <user config dir>/NyaTunnel.
@@ -58,87 +56,81 @@ func Dir() (string, error) {
 	return filepath.Join(base, "NyaTunnel"), nil
 }
 
-func path(dir string) string { return filepath.Join(dir, "identity.json") }
-
-// Load reads the identity from dir.
+// Load reads the identity from the database in dir.
 func Load(dir string) (*Identity, error) {
-	b, err := os.ReadFile(path(dir))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotEnrolled
-	}
+	st, err := store.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	var id Identity
-	if err := json.Unmarshal(b, &id); err != nil {
-		return nil, fmt.Errorf("identity file is damaged: %w", err)
+	defer st.Close()
+	return FromStore(st)
+}
+
+// FromStore reads the identity from an open database.
+func FromStore(st *store.Store) (*Identity, error) {
+	d, err := st.Device()
+	if err != nil {
+		return nil, err
 	}
-	if id.KeyStore == "keyring" {
-		v, err := keyring.Get(keyringService, id.keyringAccount())
+	if d == nil {
+		return nil, ErrNotEnrolled
+	}
+	key := d.Key
+	if d.KeyStore == "keyring" {
+		v, err := keyring.Get(keyringService, d.DeviceID)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read the device key from the system keychain: %w", err)
 		}
-		id.Key = v
+		key = v
 	}
-	seed, err := base64.StdEncoding.DecodeString(id.Key)
-	if err != nil || len(seed) != ed25519.SeedSize || id.DeviceID == "" || id.Server == "" {
-		return nil, errors.New("identity file is damaged")
+	seed, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(seed) != ed25519.SeedSize || d.DeviceID == "" || d.Server == "" {
+		return nil, errors.New("the stored device identity is damaged")
 	}
-	id.PrivateKey = ed25519.NewKeyFromSeed(seed)
-	return &id, nil
+	return &Identity{Server: d.Server, DeviceID: d.DeviceID, DeviceName: d.DeviceName, PrivateKey: ed25519.NewKeyFromSeed(seed), KeyStore: d.KeyStore}, nil
 }
 
-// Save writes the identity into a file with owner-only permissions (system services, servers).
+// Save stores the identity with the key in the database (system services, servers). It replaces
+// any previous device in dir.
 func Save(dir string, id *Identity) error { return save(dir, id, false) }
 
 // SaveUser prefers the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service)
-// for the private key and falls back to the file where there is none (headless Linux, Docker).
+// for the private key and falls back to the database where there is none (headless Linux, Docker).
 func SaveUser(dir string, id *Identity) error { return save(dir, id, true) }
 
 func save(dir string, id *Identity, useKeyring bool) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	st, err := store.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := forget(st); err != nil {
 		return err
 	}
 	seed := base64.StdEncoding.EncodeToString(id.PrivateKey.Seed())
-	id.Key, id.KeyStore = seed, ""
-	if useKeyring && keyring.Set(keyringService, id.keyringAccount(), seed) == nil {
-		id.Key, id.KeyStore = "", "keyring"
+	d := store.Device{Server: id.Server, DeviceID: id.DeviceID, DeviceName: id.DeviceName, Key: seed}
+	id.KeyStore = ""
+	if useKeyring && keyring.Set(keyringService, id.DeviceID, seed) == nil {
+		d.Key, d.KeyStore, id.KeyStore = "", "keyring", "keyring"
 	}
-	b, err := json.MarshalIndent(id, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "identity-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil && !isWindows() {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path(dir))
+	return st.SetDevice(d)
 }
 
-// Remove deletes the identity (logout or revoked), including a key in the keychain.
+// Remove deletes the identity (logout or revoked) with everything stored for it, including a key in
+// the keychain.
 func Remove(dir string) error {
-	_ = SaveDirect(dir, nil)
-	if b, err := os.ReadFile(path(dir)); err == nil {
-		var id Identity
-		if json.Unmarshal(b, &id) == nil && id.KeyStore == "keyring" {
-			_ = keyring.Delete(keyringService, id.keyringAccount())
-		}
+	st, err := store.Open(dir)
+	if err != nil {
+		return err
 	}
-	err := os.Remove(path(dir))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	defer st.Close()
+	return forget(st)
+}
+
+func forget(st *store.Store) error {
+	old, err := st.ForgetDevice()
+	if err == nil && old != nil && old.KeyStore == "keyring" {
+		_ = keyring.Delete(keyringService, old.DeviceID)
 	}
 	return err
 }
@@ -162,40 +154,4 @@ func NormalizeServer(s string) (string, error) {
 		return "http://" + u.Host, nil
 	}
 	return "https://" + host, nil
-}
-
-func isWindows() bool { return runtime.GOOS == "windows" }
-
-// Direct is the remembered direct endpoint of the server (learned over an authenticated session).
-type Direct struct {
-	Addr       string `json:"addr"`
-	CertSHA256 string `json:"certSha256"`
-}
-
-func directPath(dir string) string { return filepath.Join(dir, "direct.json") }
-
-// LoadDirect returns the remembered direct endpoint, if any.
-func LoadDirect(dir string) *Direct {
-	b, err := os.ReadFile(directPath(dir))
-	if err != nil {
-		return nil
-	}
-	var d Direct
-	if json.Unmarshal(b, &d) != nil || d.Addr == "" || len(d.CertSHA256) != 64 {
-		return nil
-	}
-	return &d
-}
-
-// SaveDirect remembers (or with nil forgets) the direct endpoint.
-func SaveDirect(dir string, d *Direct) error {
-	if d == nil {
-		err := os.Remove(directPath(dir))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	b, _ := json.Marshal(d)
-	return os.WriteFile(directPath(dir), b, 0o600)
 }

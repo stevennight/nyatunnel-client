@@ -28,17 +28,18 @@ export function isOpenable(url: string): boolean {
   return /^https?:\/\//i.test(url);
 }
 
-export type TunnelStatusKind = "ok" | "paused" | "disabled" | "expired" | "error";
+export type TunnelStatusKind = "ok" | "paused" | "disabled" | "expired" | "unconfirmed" | "error";
 
 export interface TunnelStatus {
   kind: TunnelStatusKind;
   label: string;
 }
 
-export function tunnelStatus(t: Tunnel, error: string | undefined, now = Date.now()): TunnelStatus {
+export function tunnelStatus(t: Tunnel, error: string | undefined, confirmed = true, now = Date.now()): TunnelStatus {
   if (!t.enabled) return { kind: "disabled", label: "已被管理员停用" };
   if (t.expiresAt && Date.parse(t.expiresAt) <= now) return { kind: "expired", label: "已过期" };
   if (t.pausedByClient) return { kind: "paused", label: "已由你暂停" };
+  if (!confirmed) return { kind: "unconfirmed", label: "等待你确认" };
   if (error) return { kind: "error", label: error };
   return { kind: "ok", label: "运行中" };
 }

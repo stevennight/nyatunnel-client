@@ -55,6 +55,11 @@ export interface CoreState {
   notice?: string;
   tunnels: Tunnel[];
   tunnelErrors: Record<string, string>;
+  /**
+   * Per tunnel id: whether the user confirmed its current type and local target on this device.
+   * Unconfirmed tunnels are not served; a change by the administrator needs a new confirmation.
+   */
+  confirmed: Record<string, boolean>;
   canRequest: boolean;
   configRev: number;
   service?: ServiceState | null;
@@ -162,6 +167,8 @@ export const api = {
   logout: () => core<CoreState>("POST", "/v1/logout"),
   updateTunnel: (id: string, change: { localIp?: string; localPort?: number; paused?: boolean }) =>
     core<{ ok: boolean }>("POST", `/v1/tunnels/${encodeURIComponent(id)}`, change),
+  confirmTunnel: (id: string) => core<CoreState>("POST", `/v1/tunnels/${encodeURIComponent(id)}/confirm`),
+  unconfirmTunnel: (id: string) => core<CoreState>("POST", `/v1/tunnels/${encodeURIComponent(id)}/unconfirm`),
   request: (body: TunnelRequestBody) => core<{ ok: boolean }>("POST", "/v1/requests", body),
   checkUpdate: (force = false) => core<UpdateInfo>("GET", force ? "/v1/update?force=1" : "/v1/update"),
   /**

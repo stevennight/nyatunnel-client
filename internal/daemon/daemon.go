@@ -21,6 +21,7 @@ import (
 	"nyatunnel-client/internal/identity"
 	"nyatunnel-client/internal/logbuf"
 	"nyatunnel-client/internal/service"
+	"nyatunnel-client/internal/store"
 	"nyatunnel-client/internal/update"
 )
 
@@ -65,8 +66,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 // run starts the agent for id (replacing any running one).
 func (d *Daemon) run(id *identity.Identity) {
 	d.halt()
+	st, err := store.Open(d.Dir)
+	if err != nil {
+		// Without the database no tunnel can be confirmed; the session still shows the tunnels.
+		d.Log.Error("cannot open the local database", "err", err)
+		st = nil
+	}
 	ctx, cancel := context.WithCancel(d.ctx)
-	a := agent.New(agent.Options{Identity: id, Version: d.Version, GUI: d.GUI, Log: d.Log, Dir: d.Dir})
+	a := agent.New(agent.Options{Identity: id, Version: d.Version, GUI: d.GUI, Log: d.Log, Store: st})
 	done := make(chan struct{})
 	d.mu.Lock()
 	d.id, d.agent, d.stop, d.done, d.notice = id, a, cancel, done, ""
@@ -76,6 +83,9 @@ func (d *Daemon) run(id *identity.Identity) {
 	go func() {
 		defer close(done)
 		err := a.Run(ctx)
+		if st != nil {
+			st.Close()
+		}
 		switch {
 		case errors.Is(err, agent.ErrRevoked):
 			_ = identity.Remove(d.Dir)
@@ -122,8 +132,10 @@ type State struct {
 	Notice       string               `json:"notice,omitempty"`
 	Tunnels      []tunnelproto.Tunnel `json:"tunnels"`
 	TunnelErrors map[string]string    `json:"tunnelErrors"`
-	CanRequest   bool                 `json:"canRequest"`
-	ConfigRev    int64                `json:"configRev"`
+	// Confirmed says per tunnel id whether the user confirmed its current local target here.
+	Confirmed  map[string]bool `json:"confirmed"`
+	CanRequest bool            `json:"canRequest"`
+	ConfigRev  int64           `json:"configRev"`
 	// Service is set when a system service runs a device on this machine.
 	Service *ServiceState `json:"service,omitempty"`
 }
@@ -155,7 +167,7 @@ func (d *Daemon) State() State {
 	d.mu.Lock()
 	id, a, notice := d.id, d.agent, d.notice
 	d.mu.Unlock()
-	st := State{Version: d.Version, ConfigDir: d.Dir, Notice: notice, Tunnels: []tunnelproto.Tunnel{}, TunnelErrors: map[string]string{}}
+	st := State{Version: d.Version, ConfigDir: d.Dir, Notice: notice, Tunnels: []tunnelproto.Tunnel{}, TunnelErrors: map[string]string{}, Confirmed: map[string]bool{}}
 	if info, err := service.ReadInfo(); err == nil {
 		ss, _ := service.QueryStatus()
 		st.Service = &ServiceState{Running: ss.Running, Server: info.Server, DeviceID: info.DeviceID, DeviceName: info.DeviceName, Detail: ss.Detail, SharesCore: serviceSharesCore(info)}
@@ -168,7 +180,7 @@ func (d *Daemon) State() State {
 		return st
 	}
 	as := a.State()
-	st.Connected, st.LastError, st.TunnelErrors, st.Transport = as.Connected, as.LastError, as.TunnelErrors, as.Transport
+	st.Connected, st.LastError, st.TunnelErrors, st.Transport, st.Confirmed = as.Connected, as.LastError, as.TunnelErrors, as.Transport, as.Confirmed
 	if as.Connected {
 		t := as.ConnectedAt
 		st.ConnectedAt = &t
@@ -292,6 +304,24 @@ func (d *Daemon) Update(ctx context.Context, u tunnelproto.TunnelUpdate) error {
 		return err
 	}
 	return a.Update(ctx, u)
+}
+
+// Confirm agrees to serve a tunnel with its current local target (协议.md §4.6).
+func (d *Daemon) Confirm(id string) error {
+	a, err := d.current()
+	if err != nil {
+		return err
+	}
+	return a.Confirm(id)
+}
+
+// Unconfirm withdraws the confirmation of a tunnel; the device stops serving it.
+func (d *Daemon) Unconfirm(id string) error {
+	a, err := d.current()
+	if err != nil {
+		return err
+	}
+	return a.Unconfirm(id)
 }
 
 // Request files a tunnel request.

@@ -304,6 +304,7 @@ export function App() {
             <TunnelDetail
               tunnel={detail}
               error={state.tunnelErrors?.[detail.id]}
+              confirmed={Boolean(state.confirmed?.[detail.id])}
               logs={lines}
               onBack={() => setPage({ name: "tunnels" })}
               onChanged={refresh}

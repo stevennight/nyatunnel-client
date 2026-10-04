@@ -3,6 +3,8 @@ name: ${NYATUNNEL_PROJECT:-nyatunnel-client}
 # Headless NyaTunnel client. Copy this file into a deployment directory, then:
 #   1. Enroll once (interactive):  docker compose run --rm client enroll https://tunnel.example.com XXXX-XXXX
 #   2. Start:                      docker compose up -d
+#   3. Confirm each tunnel once:   docker compose run --rm client tunnels  (then: tunnels confirm <id>)
+#      Tunnels stay off until confirmed on this device; the running client picks it up within seconds.
 # Settings come from .env next to this file; the device identity lives in ./data (back it up).
 services:
   client:

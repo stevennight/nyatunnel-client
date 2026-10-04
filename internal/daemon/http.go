@@ -93,6 +93,20 @@ func (d *Daemon) Handler(token string, shutdown func()) http.Handler {
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("POST /v1/tunnels/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
+		if err := d.Confirm(r.PathValue("id")); err != nil {
+			failErr(w, err)
+			return
+		}
+		writeJSON(w, 200, d.State())
+	})
+	mux.HandleFunc("POST /v1/tunnels/{id}/unconfirm", func(w http.ResponseWriter, r *http.Request) {
+		if err := d.Unconfirm(r.PathValue("id")); err != nil {
+			failErr(w, err)
+			return
+		}
+		writeJSON(w, 200, d.State())
+	})
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
 		var body tunnelproto.TunnelRequest
 		if !decode(w, r, &body) {
@@ -197,6 +211,8 @@ func failErr(w http.ResponseWriter, err error) {
 			msg = "服务器拒绝了请求（" + re.Code + "）"
 		}
 		fail(w, 400, re.Code, msg)
+	case errors.Is(err, agent.ErrUnknownTunnel):
+		fail(w, 404, "unknown_tunnel", "本机没有这个隧道（可能已被管理员删除）")
 	case errors.Is(err, agent.ErrOffline):
 		fail(w, 503, "offline", "尚未连接到服务器")
 	case errors.Is(err, ErrNotEnrolled):

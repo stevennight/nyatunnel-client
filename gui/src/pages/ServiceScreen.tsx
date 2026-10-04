@@ -30,6 +30,10 @@ export function ServiceScreen(props: { service: ServiceState }) {
           隧道由系统服务管理，可以在服务器的 Web 管理台查看本设备与隧道。
           如需改回由本程序运行，请以管理员身份执行 <code>nyatunnel service uninstall</code>。
         </div>
+        <div className="warnbox">
+          下发给本机的隧道要在本机确认后才会接通。请以管理员身份执行 <code>nyatunnel tunnels --service</code> 查看，
+          用 <code>nyatunnel tunnels confirm &lt;隧道&gt; --service</code> 确认。
+        </div>
       </div>
     </div>
   );

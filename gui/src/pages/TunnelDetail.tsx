@@ -1,10 +1,43 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, type LogLine, type Tunnel } from "../api";
-import { copyText, useNotify } from "../components/ui";
+import { ConfirmDialog, copyText, useNotify } from "../components/ui";
 import { LogView } from "../components/LogView";
 import { openExternal } from "../open";
 import { errorMessage, expiryLabel, formatTime, isLoopback, isOpenable, isValidPort, tunnelStatus, typeLabel } from "../util";
-import { lockText, PauseSwitch } from "./TunnelList";
+import { ConfirmTunnelButton, lockText, PauseSwitch } from "./TunnelList";
+
+/** Withdraws the confirmation: the device stops serving the tunnel until it is confirmed again. */
+function RevokeConfirmation(props: { tunnel: Tunnel; onChanged: () => void }) {
+  const t = props.tunnel;
+  const notify = useNotify();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function revoke() {
+    setBusy(true);
+    try {
+      await api.unconfirmTunnel(t.id);
+      notify(`已撤销 ${t.name} 的确认`, "ok");
+      setOpen(false);
+      props.onChanged();
+    } catch (e) {
+      notify(errorMessage(e), "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button className="btn sm" onClick={() => setOpen(true)}>撤销确认</button>
+      {open && (
+        <ConfirmDialog title={`撤销 ${t.name} 的确认`} confirmLabel="撤销" danger busy={busy} onConfirm={revoke} onCancel={() => setOpen(false)}>
+          <p>本机会立即停止转发这个隧道，管理员那边会显示“等待设备确认”。需要时可以重新确认。</p>
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
 
 function LocalTargetForm(props: { tunnel: Tunnel; onChanged: () => void }) {
   const t = props.tunnel;
@@ -94,13 +127,14 @@ function LocalTargetForm(props: { tunnel: Tunnel; onChanged: () => void }) {
 export function TunnelDetail(props: {
   tunnel: Tunnel;
   error?: string;
+  confirmed: boolean;
   logs: LogLine[];
   onBack: () => void;
   onChanged: () => void;
 }) {
   const t = props.tunnel;
   const notify = useNotify();
-  const status = tunnelStatus(t, props.error);
+  const status = tunnelStatus(t, props.error, props.confirmed);
   const expiry = expiryLabel(t.expiresAt);
   const lock = lockText(t);
   const related = props.logs.filter((l) => l.text.includes(t.name) || l.text.includes(t.id)).slice(-200);
@@ -117,7 +151,16 @@ export function TunnelDetail(props: {
           <PauseSwitch tunnel={t} onChanged={props.onChanged} />
         </div>
       </div>
-      {props.error && <div className="badbox">⚠ {props.error}</div>}
+      {!props.confirmed && (
+        <div className="warnbox" data-testid="confirm-box">
+          <div style={{ marginBottom: 8 }}>
+            这个隧道还没有在本机确认，确认前不会接通。确认后，经公网入口 <b className="mono">{t.publicUrl}</b> 可以访问本机能连到的{" "}
+            <b className="mono">{t.localIp}:{t.localPort}</b>。
+          </div>
+          <ConfirmTunnelButton tunnel={t} onChanged={props.onChanged} />
+        </div>
+      )}
+      {props.confirmed && props.error && <div className="badbox">⚠ {props.error}</div>}
       <div className="grid2">
         <div className="card">
           <div className="k">公网入口（只读）</div>
@@ -146,6 +189,12 @@ export function TunnelDetail(props: {
         )}
       </div>
       {lock && <div className="lockline" style={{ marginTop: 10 }}>🔐 {lock}</div>}
+      {props.confirmed && (
+        <div className="lockline" style={{ marginTop: 10 }} data-testid="confirmed-note">
+          ✔ 已在本机确认当前本地目标；管理员修改类型或本地目标后需要重新确认。
+          <RevokeConfirmation tunnel={t} onChanged={props.onChanged} />
+        </div>
+      )}
       <div className="k" style={{ margin: "14px 0 6px" }}>相关日志</div>
       <LogView lines={related} className="small" empty="暂无与此隧道相关的日志" />
     </>
