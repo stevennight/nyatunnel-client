@@ -35,6 +35,8 @@ export interface ServiceState {
   deviceId: string;
   deviceName: string;
   detail?: string;
+  /** The service runs this app's own nyatunnel.exe (older installs): the app must not update itself. */
+  sharesCore?: boolean;
 }
 
 export interface CoreState {
@@ -97,6 +99,23 @@ export interface UpdateInfo {
   latest: string;
   newer: boolean;
   url: string;
+  /** Outcome of the last unattended install (written by the updater). */
+  lastAttempt?: UpdateAttempt | null;
+}
+
+export interface UpdateAttempt {
+  from: string;
+  to: string;
+  ok: boolean;
+  rolledBack?: boolean;
+  error?: string;
+  at: string;
+}
+
+/** A failed version is not retried automatically for a day (each try interrupts the tunnels). */
+export function recentlyFailed(u: UpdateInfo): boolean {
+  const a = u.lastAttempt;
+  return !!a && !a.ok && a.to.replace(/^v/, "") === u.latest.replace(/^v/, "") && Date.now() - Date.parse(a.at) < 24 * 3600 * 1000;
 }
 
 /** Status of the bundled core process, maintained by the Rust side. */

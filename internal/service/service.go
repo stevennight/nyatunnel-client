@@ -56,8 +56,13 @@ type Status struct {
 }
 
 // Install registers the service to run `<exe> run` with NYATUNNEL_HOME=SystemDir and starts it.
+// On Windows exe is first copied into BinDir, which only administrators can change.
 func Install(exe string, info Info) error {
 	if err := prepareDir(); err != nil {
+		return err
+	}
+	exe, err := placeBinary(exe)
+	if err != nil {
 		return err
 	}
 	info.Executable = exe

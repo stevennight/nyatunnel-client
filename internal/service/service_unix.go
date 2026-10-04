@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // SystemDir is /etc/nyatunnel on Linux and /Library/Application Support/NyaTunnel on macOS.
@@ -124,3 +126,12 @@ func IsService() bool { return false }
 
 // RunService is only used on Windows.
 func RunService(fn func(ctx context.Context) error) error { return ErrUnsupported }
+
+// The service runs the binary it was installed from; automatic service updates are Windows-only.
+
+func BinDir() string                         { return filepath.Join(SystemDir(), "bin") }
+func placeBinary(exe string) (string, error) { return exe, nil }
+func Stop(time.Duration) error               { return ErrUnsupported }
+func Start() error                           { return ErrUnsupported }
+func Executable() (string, error)            { return "", ErrUnsupported }
+func SetExecutable(string) error             { return ErrUnsupported }

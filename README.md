@@ -32,12 +32,15 @@ nyatunnel run                     # 前台运行（Ctrl+C 退出）
 nyatunnel status                  # 注册信息与隧道（只读查询，不影响正在运行的会话）
 nyatunnel service install         # 安装为系统服务，开机即运行（需要管理员 / root）
 nyatunnel service uninstall [--purge]
-nyatunnel service status
+nyatunnel service status          # 含自动更新开关与上次自动更新的结果
+nyatunnel service auto-update on|off   # Windows 系统服务是否自动安装新版本（默认开启）
 nyatunnel update [--check]        # 从 GitHub Releases 更新
 nyatunnel logout                  # 删除本机设备密钥
 ```
 
-配置目录默认为系统的用户配置目录下的 `NyaTunnel`，可用 `NYATUNNEL_HOME` 指定。安装为系统服务后，设备身份移到 `%ProgramData%\NyaTunnel`（Windows）、`/etc/nyatunnel`（Linux）或 `/Library/Application Support/NyaTunnel`（macOS），仅管理员 / root 可读。
+配置目录默认为系统的用户配置目录下的 `NyaTunnel`，可用 `NYATUNNEL_HOME` 指定。安装为系统服务后，设备身份移到 `%ProgramData%\NyaTunnel`（Windows）、`/etc/nyatunnel`（Linux）或 `/Library/Application Support/NyaTunnel`（macOS），仅管理员 / root 可读。Windows 上服务运行的是复制到 `%ProgramData%\NyaTunnel\bin` 的程序（同样只有管理员可改），与桌面版的安装目录互不影响。
+
+Windows 系统服务会自己更新：启动 1 分钟后和之后每 6 小时检查一次（服务器要求升级时立即检查），下载 CLI 并核对 `SHA256SUMS`，再交给一个从副本运行的更新程序：停止服务、替换程序、启动服务，等新版本报告“已启动”（之前在线的还要“已重新连上服务器”）。两分钟内没有做到就换回旧程序并重新启动服务。全程以 SYSTEM 运行，不需要有人登录，也不会弹出 UAC。日志在 `%ProgramData%\NyaTunnel\update.log`，失败的版本一天内不再自动重试。
 
 ## Docker（服务器 / NAS）
 
@@ -70,9 +73,17 @@ go run ./cmd/nyatunnel link "nyatunnel://enroll?v=1&s=tunnel.example.net&c=K7QP-
 - 深链 `nyatunnel://enroll?…` 只会打开确认对话框：先向服务器取回预览（服务器、邀请人、将获得的隧道），用户点“确认加入”后才生成密钥并注册；首次连接的服务器和会切换服务器的链接都有醒目提示。`nyatunnel://open?…` 只聚焦窗口并定位隧道。第二个实例（Windows / Linux 点击链接时）会把链接交给已运行的实例。
 - 页面：首次启动、我的隧道、隧道详情、申请隧道、日志、设置；核心以系统服务运行时显示“本机由系统服务运行”。
 - 自动更新（设置里可关闭，默认开启）：启动时和每 6 小时检查一次 GitHub Releases，发现新版本就由核心下载本平台的安装包并核对 `SHA256SUMS`（`POST /v1/update/download`，只写入系统临时目录下的 `NyaTunnel-update`），再由 Rust 命令 `install_update` 校验路径后安装：
-  - Windows：停止核心，以 `/P /R` 静默运行 NSIS 安装包后退出；安装包直接覆盖安装并重启，**不会询问是否先卸载**（见下方自定义模板）。
+  - Windows：全程无人值守，界面只负责启动更新程序后退出。更新程序是捆绑的 `nyatunnel.exe` 的副本，从安装目录以外运行（`nyatunnel update apply --mode gui`），步骤如下：
+    1. 等界面退出，并结束安装目录里仍在运行的进程。
+    2. 备份安装目录。
+    3. 以 `/S /UPDATE` 静默运行 NSIS 安装包（当前用户安装，无 UAC），**不会询问是否先卸载**（见下方自定义模板）。
+    4. 核对安装后的版本，以 `--autostart` 启动新版本（回到托盘）。
+    5. 等核心在配置目录的 `running.json` 里报告新版本已启动；之前在线的，还要等它重新连上服务器。
+    6. 任何一步失败，或两分钟内没有做到，就恢复备份并启动旧版本，保证隧道不会因为更新而一直断开。
+
+    结果写入配置目录的 `update-result.json`（界面会提示成功，或提示失败并说明已恢复），日志写入 `update.log`。失败的版本一天内不再自动重试。
   - Linux AppImage：替换 `$APPIMAGE` 并启动新版本；deb 与 macOS dmg 打开安装包，由用户完成。
-  - 开发构建和由系统服务运行核心时不自动安装（设置里仍可手动“立即更新”）。
+  - 开发构建不自动安装。系统服务仍在运行桌面版目录里的 `nyatunnel.exe`（较早的安装方式）时，界面也不自动安装，等服务自动更新、把程序迁到自己的目录之后再更新（设置里仍可手动“立即更新”）。
 
 开发需要 Node 24、Rust stable、Go，以及各平台的 [Tauri 依赖](https://v2.tauri.app/start/prerequisites/)（Windows：VS Build Tools + WebView2；Linux：`libwebkit2gtk-4.1-dev` 等，见 `.github/workflows/ci.yml`）。
 

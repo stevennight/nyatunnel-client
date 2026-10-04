@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.mu.Unlock()
 	id, err := identity.Load(d.Dir)
 	if errors.Is(err, identity.ErrNotEnrolled) {
+		// running.json tells an updater that this version started.
+		go update.TrackHealth[agent.State](ctx, d.Dir, d.Version, nil, nil)
 		return nil
 	}
 	if err != nil {
@@ -68,6 +71,8 @@ func (d *Daemon) run(id *identity.Identity) {
 	d.mu.Lock()
 	d.id, d.agent, d.stop, d.done, d.notice = id, a, cancel, done, ""
 	d.mu.Unlock()
+	// running.json tells an updater that this version started and connected.
+	go update.TrackHealth(ctx, d.Dir, d.Version, a.Watch(), func(s agent.State) bool { return s.Connected })
 	go func() {
 		defer close(done)
 		err := a.Run(ctx)
@@ -130,6 +135,19 @@ type ServiceState struct {
 	DeviceID   string `json:"deviceId"`
 	DeviceName string `json:"deviceName"`
 	Detail     string `json:"detail,omitempty"`
+	// SharesCore is set when the service runs this app's own nyatunnel.exe (installed before
+	// services got their own copy): the app must not update itself until the service moved away.
+	SharesCore bool `json:"sharesCore,omitempty"`
+}
+
+// serviceSharesCore reports whether the service runs the executable of this process.
+func serviceSharesCore(info *service.Info) bool {
+	self, err := os.Executable()
+	if err != nil || info.Executable == "" {
+		return false
+	}
+	a, b := filepath.Clean(self), filepath.Clean(info.Executable)
+	return a == b || (os.PathSeparator == '\\' && strings.EqualFold(a, b))
 }
 
 // State returns a snapshot.
@@ -140,7 +158,7 @@ func (d *Daemon) State() State {
 	st := State{Version: d.Version, ConfigDir: d.Dir, Notice: notice, Tunnels: []tunnelproto.Tunnel{}, TunnelErrors: map[string]string{}}
 	if info, err := service.ReadInfo(); err == nil {
 		ss, _ := service.QueryStatus()
-		st.Service = &ServiceState{Running: ss.Running, Server: info.Server, DeviceID: info.DeviceID, DeviceName: info.DeviceName, Detail: ss.Detail}
+		st.Service = &ServiceState{Running: ss.Running, Server: info.Server, DeviceID: info.DeviceID, DeviceName: info.DeviceName, Detail: ss.Detail, SharesCore: serviceSharesCore(info)}
 	}
 	if id == nil {
 		return st
@@ -292,6 +310,8 @@ type UpdateInfo struct {
 	Latest  string `json:"latest"`
 	Newer   bool   `json:"newer"`
 	URL     string `json:"url"`
+	// LastAttempt is the outcome of the last automatic install (nil when there was none).
+	LastAttempt *update.Result `json:"lastAttempt,omitempty"`
 }
 
 // CheckUpdate asks GitHub at most every six hours unless forced.
@@ -300,7 +320,9 @@ func (d *Daemon) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, erro
 	cached, at := d.update, d.updateAt
 	d.mu.Unlock()
 	if cached != nil && !force && time.Since(at) < 6*time.Hour {
-		return cached, nil
+		c := *cached
+		c.LastAttempt = d.lastAttempt()
+		return &c, nil
 	}
 	r, err := update.Latest(ctx)
 	if err != nil {
@@ -311,7 +333,17 @@ func (d *Daemon) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, erro
 	d.mu.Lock()
 	d.update, d.updateAt = info, time.Now()
 	d.mu.Unlock()
-	return info, nil
+	c := *info
+	c.LastAttempt = d.lastAttempt()
+	return &c, nil
+}
+
+func (d *Daemon) lastAttempt() *update.Result {
+	r, err := update.ReadResult(d.Dir)
+	if err != nil {
+		return nil
+	}
+	return r
 }
 
 // DownloadedUpdate is a verified installer ready to run.
@@ -329,6 +361,9 @@ func (d *Daemon) DownloadUpdate(ctx context.Context, appImage bool) (*Downloaded
 	}
 	if !update.Newer(r.Version, strings.TrimPrefix(d.Version, "v")) {
 		return nil, errors.New("已是最新版本")
+	}
+	if info, err := service.ReadInfo(); err == nil && serviceSharesCore(info) {
+		return nil, errors.New("系统服务正在使用本程序目录中的 nyatunnel.exe（较早的安装方式），暂时无法更新界面。请用新版 CLI 以管理员身份运行一次 `nyatunnel service update`，服务会迁到自己的目录，之后界面即可正常更新")
 	}
 	path, kind, err := update.DownloadGUI(ctx, r, appImage)
 	if err != nil {

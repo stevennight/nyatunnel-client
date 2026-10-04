@@ -4,10 +4,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -34,6 +37,36 @@ func prepareDir() error {
 		return fmt.Errorf("icacls: %v: %s", err, out)
 	}
 	return nil
+}
+
+// BinDir is where the service runs from. It sits inside SystemDir, so only SYSTEM and
+// Administrators can change it: a service binary that a user can replace would hand out SYSTEM
+// rights. It also keeps the service independent of the desktop app's install directory.
+func BinDir() string { return filepath.Join(SystemDir(), "bin") }
+
+// placeBinary copies exe into BinDir and returns the copy's path.
+func placeBinary(exe string) (string, error) {
+	target := filepath.Join(BinDir(), "nyatunnel.exe")
+	if strings.EqualFold(filepath.Clean(exe), target) {
+		return target, nil
+	}
+	if err := os.MkdirAll(BinDir(), 0o755); err != nil {
+		return "", err
+	}
+	in, err := os.Open(exe)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.Create(target)
+	if err != nil {
+		return "", fmt.Errorf("无法写入 %s：%w", target, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return "", err
+	}
+	return target, out.Close()
 }
 
 // AllowInfoRead makes service.json readable by users (the directory ACL only grants traverse/list).
@@ -68,6 +101,122 @@ func install(exe string) error {
 	return s.Start()
 }
 
+func openService() (*mgr.Mgr, *mgr.Service, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return nil, nil, fmt.Errorf("需要管理员权限：%w", err)
+	}
+	s, err := m.OpenService(Name)
+	if err != nil {
+		m.Disconnect()
+		return nil, nil, fmt.Errorf("服务未安装")
+	}
+	return m, s, nil
+}
+
+// Stop stops the service, waiting up to timeout before killing its process.
+func Stop(timeout time.Duration) error {
+	m, s, err := openService()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	st, err := s.Query()
+	if err != nil {
+		return err
+	}
+	if st.State == svc.Stopped {
+		return nil
+	}
+	pid := st.ProcessId
+	_, _ = s.Control(svc.Stop)
+	for end := time.Now().Add(timeout); time.Now().Before(end); time.Sleep(300 * time.Millisecond) {
+		if st, err := s.Query(); err == nil && st.State == svc.Stopped {
+			return nil
+		}
+	}
+	if pid != 0 {
+		if p, err := os.FindProcess(int(pid)); err == nil {
+			_ = p.Kill()
+			_, _ = p.Wait()
+		}
+	}
+	for i := 0; i < 50; i++ {
+		if st, err := s.Query(); err == nil && st.State == svc.Stopped {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return errors.New("服务没有停止")
+}
+
+// Start starts the service (a running service is left alone).
+func Start() error {
+	m, s, err := openService()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
+		return nil
+	}
+	return s.Start()
+}
+
+// Executable returns the program the service runs.
+func Executable() (string, error) {
+	m, s, err := openService()
+	if err != nil {
+		return "", err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	cfg, err := s.Config()
+	if err != nil {
+		return "", err
+	}
+	return exeOf(cfg.BinaryPathName), nil
+}
+
+// exeOf extracts the program from a service command line (`"C:\x\nyatunnel.exe" service run`).
+func exeOf(cmdline string) string {
+	cmdline = strings.TrimSpace(cmdline)
+	if strings.HasPrefix(cmdline, `"`) {
+		if end := strings.Index(cmdline[1:], `"`); end >= 0 {
+			return cmdline[1 : end+1]
+		}
+	}
+	if i := strings.Index(strings.ToLower(cmdline), ".exe"); i >= 0 {
+		return cmdline[:i+4]
+	}
+	return cmdline
+}
+
+// SetExecutable points the service at exe (it takes effect on the next start).
+func SetExecutable(exe string) error {
+	m, s, err := openService()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	cfg, err := s.Config()
+	if err != nil {
+		return err
+	}
+	cfg.BinaryPathName = `"` + exe + `" service run`
+	if err := s.UpdateConfig(cfg); err != nil {
+		return err
+	}
+	if info, err := ReadInfo(); err == nil {
+		info.Executable = exe
+		_ = writeInfo(*info)
+	}
+	return nil
+}
+
 func uninstall() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -88,7 +237,11 @@ func uninstall() error {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	return s.Delete()
+	if err := s.Delete(); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(BinDir()) // best effort: fails only if someone runs that copy right now
+	return nil
 }
 
 func status() (Status, error) {

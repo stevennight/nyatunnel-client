@@ -36,23 +36,54 @@ pub fn validate(path: &str, kind: &str) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-/// Starts the Windows installer passively: no questions, a progress bar, the installed app is
-/// replaced in place (our installer never offers to uninstall first) and restarted (`/R`).
+/// Hands a Windows update to the unattended updater (`nyatunnel update apply --mode gui`): a copy
+/// of the bundled core started detached from outside the install directory. Once this app has
+/// exited it installs silently, starts the new version in the tray and checks that it runs (and
+/// reconnects, if it was connected); otherwise it restores the old files and starts the old
+/// version. The machine is never left without a running tunnel client.
 #[cfg(windows)]
-pub fn run_nsis(installer: &Path) -> Result<(), String> {
+pub fn launch_updater(installer: &Path, from: &str, to: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    std::process::Command::new(installer)
-        .args(["/P", "/R"])
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .spawn()
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    let exe = std::env::current_exe().map_err(|e| format!("找不到程序位置：{e}"))?;
+    let app_dir = exe.parent().ok_or("找不到安装目录")?;
+    // The updater stops and backs up everything in this directory: only accept an installation.
+    if !app_dir.join("uninstall.exe").is_file() {
+        return Err("当前不是安装版（找不到 uninstall.exe），请从发布页下载安装包更新".into());
+    }
+    let app = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("程序文件名无效")?;
+    let updater = update_dir().join("nyatunnel-updater.exe");
+    std::fs::copy(app_dir.join("nyatunnel.exe"), &updater)
+        .map_err(|e| format!("无法准备更新程序（可能已有更新在进行）：{e}"))?;
+
+    let spawn = |flags: u32| {
+        std::process::Command::new(&updater)
+            .args(["update", "apply", "--mode", "gui", "--installer"])
+            .arg(installer)
+            .arg("--app-dir")
+            .arg(app_dir)
+            .args(["--app", app, "--from", from, "--to", to, "--wait-pid"])
+            .arg(std::process::id().to_string())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    // Break away from any job object so the updater survives this app exiting.
+    spawn(base | CREATE_BREAKAWAY_FROM_JOB)
+        .or_else(|_| spawn(base))
         .map(|_| ())
-        .map_err(|e| format!("无法启动安装程序：{e}"))
+        .map_err(|e| format!("无法启动更新程序：{e}"))
 }
 
 #[cfg(not(windows))]
-pub fn run_nsis(_installer: &Path) -> Result<(), String> {
+pub fn launch_updater(_installer: &Path, _from: &str, _to: &str) -> Result<(), String> {
     Err("此平台不使用 Windows 安装程序".into())
 }
 

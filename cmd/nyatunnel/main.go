@@ -48,6 +48,8 @@ const usage = `用法: nyatunnel <命令> [参数]
   service install            安装为系统服务（开机即运行，无需登录；需要管理员 / root）
   service uninstall [--purge] 卸载系统服务（--purge 同时删除服务使用的设备密钥）
   service status             查看系统服务状态
+  service auto-update on|off 系统服务是否自动安装新版本（默认开启，仅 Windows）
+  service update             立即把系统服务更新到最新版本（失败自动恢复，仅 Windows）
   update [--check]           检查并安装新版本（从 GitHub Releases 下载并校验 SHA256SUMS）
   version                    显示版本
 
@@ -258,6 +260,8 @@ func cmdRun(stderr io.Writer) int {
 // (3: revoked, do not restart).
 func runAgent(ctx context.Context, dir string, id *identity.Identity, log *slog.Logger) int {
 	a := agent.New(agent.Options{Identity: id, Version: version.Version, Log: log, Dir: dir})
+	// running.json tells an updater that this version started and connected.
+	go update.TrackHealth(ctx, dir, version.Version, a.Watch(), func(s agent.State) bool { return s.Connected })
 	go func() {
 		for st := range a.Watch() {
 			if st.Config == nil {
@@ -396,6 +400,9 @@ func cmdDaemon(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func cmdUpdate(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "apply" {
+		return cmdUpdateApply(args[1:], stderr)
+	}
 	checkOnly := len(args) > 0 && args[0] == "--check"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -429,9 +436,91 @@ func cmdUpdate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// cmdUpdateApply is the unattended updater. The desktop app and the system service start it from
+// a copy of this binary outside the directory being replaced; it installs the new version, waits
+// until it runs, and restores the old one otherwise.
+func cmdUpdateApply(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("update apply", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	mode := fs.String("mode", "", "gui or service")
+	installer := fs.String("installer", "", "gui: verified installer")
+	appDir := fs.String("app-dir", "", "gui: install directory")
+	app := fs.String("app", "", "gui: app executable name")
+	waitPID := fs.Int("wait-pid", 0, "gui: app process to wait for")
+	newExe := fs.String("new", "", "service: verified new executable")
+	from := fs.String("from", "", "current version")
+	to := fs.String("to", "", "new version")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	var stateDir string
+	switch *mode {
+	case "gui":
+		dir, err := identity.Dir()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		stateDir = dir
+	case "service":
+		stateDir = service.SystemDir()
+	default:
+		fmt.Fprintln(stderr, "--mode must be gui or service")
+		return 2
+	}
+	logFile, err := openLog(filepath.Join(stateDir, "update.log"))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer logFile.Close()
+	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})).With("mode", *mode)
+	ctx := context.Background()
+	var res update.Result
+	if *mode == "gui" {
+		res = update.GUIUpdate{Installer: *installer, AppDir: *appDir, App: *app, WaitPID: *waitPID, From: *from, To: *to, StateDir: stateDir}.Run(ctx, log)
+	} else {
+		res = update.ServiceUpdate{New: *newExe, From: *from, To: *to}.Run(ctx, log)
+	}
+	if !res.OK {
+		return 1
+	}
+	return 0
+}
+
+// serviceAutoUpdate checks for a new release a minute after the service starts and then every
+// six hours, and hands over to the updater when there is one (see update.StartServiceUpdate).
+func serviceAutoUpdate(ctx context.Context, log *slog.Logger) {
+	wait := time.Minute
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = 6 * time.Hour
+		tryServiceUpdate(ctx, log)
+	}
+}
+
+func tryServiceUpdate(ctx context.Context, log *slog.Logger) {
+	if !update.ServiceAutoUpdate() {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	v, err := update.StartServiceUpdate(cctx, false)
+	switch {
+	case err != nil:
+		log.Warn("automatic update", "err", err)
+	case v != "":
+		log.Info("installing update; the service restarts shortly", "version", v)
+	}
+}
+
 func cmdService(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "用法: nyatunnel service install | uninstall [--purge] | status")
+		fmt.Fprintln(stderr, "用法: nyatunnel service install | uninstall [--purge] | status | update | auto-update on|off")
 		return 2
 	}
 	switch args[0] {
@@ -494,6 +583,51 @@ func cmdService(args []string, stdout, stderr io.Writer) int {
 		if info, err := service.ReadInfo(); err == nil {
 			fmt.Fprintf(stdout, "服务器 %s，设备 %s（%s）\n", info.Server, info.DeviceName, info.DeviceID)
 		}
+		auto := "开启"
+		if !update.ServiceAutoUpdate() {
+			auto = "关闭"
+		}
+		fmt.Fprintf(stdout, "自动更新：%s\n", auto)
+		if r, err := update.ReadResult(service.SystemDir()); err == nil {
+			if r.OK {
+				fmt.Fprintf(stdout, "上次自动更新：%s 从 %s 更新到 %s\n", r.At.Local().Format("2006-01-02 15:04"), r.From, r.To)
+			} else {
+				after := "未能恢复旧版本，请检查服务"
+				if r.RolledBack {
+					after = "已恢复为 " + r.From
+				}
+				fmt.Fprintf(stdout, "上次自动更新失败：%s 更新到 %s 时 %s（%s）\n", r.At.Local().Format("2006-01-02 15:04"), r.To, r.Error, after)
+			}
+		}
+		return 0
+	case "update":
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		v, err := update.StartServiceUpdate(ctx, true)
+		if err != nil {
+			fmt.Fprintln(stderr, "更新失败（需要管理员权限）:", err)
+			return 1
+		}
+		if v == "" {
+			fmt.Fprintln(stdout, "系统服务已是最新版本。")
+			return 0
+		}
+		fmt.Fprintf(stdout, "正在把系统服务更新到 %s：服务会重启一次，失败时自动恢复旧版本。结果见 `nyatunnel service status`。\n", v)
+		return 0
+	case "auto-update":
+		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
+			fmt.Fprintln(stderr, "用法: nyatunnel service auto-update on|off")
+			return 2
+		}
+		if err := update.SetServiceAutoUpdate(args[1] == "on"); err != nil {
+			fmt.Fprintln(stderr, "设置失败（需要管理员权限）:", err)
+			return 1
+		}
+		if args[1] == "on" {
+			fmt.Fprintln(stdout, "已开启：系统服务会自动安装新版本，失败时自动恢复旧版本。")
+		} else {
+			fmt.Fprintln(stdout, "已关闭系统服务的自动更新。")
+		}
 		return 0
 	case "run":
 		// Started by the Windows service manager.
@@ -515,12 +649,18 @@ func runAsService(stderr io.Writer) int {
 	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	code := 0
 	err = service.RunService(func(ctx context.Context) error {
+		go serviceAutoUpdate(ctx, log)
 		id, err := identity.Load(dir)
 		if err != nil {
 			log.Error("cannot load identity", "dir", dir, "err", err)
 			return err
 		}
-		if code = runAgent(ctx, dir, id, log); code != 0 && code != 3 {
+		code = runAgent(ctx, dir, id, log)
+		if code == 4 {
+			// The server refuses this version: update now instead of waiting for the next check.
+			tryServiceUpdate(ctx, log)
+		}
+		if code != 0 && code != 3 {
 			return fmt.Errorf("agent stopped with code %d", code)
 		}
 		return nil
@@ -534,7 +674,14 @@ func runAsService(stderr io.Writer) int {
 
 // openServiceLog appends to nyatunnel.log in dir, starting over beyond 5 MB.
 func openServiceLog(dir string) (*os.File, error) {
-	path := filepath.Join(dir, "nyatunnel.log")
+	return openLog(filepath.Join(dir, "nyatunnel.log"))
+}
+
+// openLog appends to path, starting over beyond 5 MB.
+func openLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
 	if st, err := os.Stat(path); err == nil && st.Size() > 5<<20 {
 		_ = os.Rename(path, path+".old")
 	}

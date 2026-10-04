@@ -14,13 +14,13 @@ const newer = {
   url: "https://github.com/stevennight/nyatunnel-client/releases/tag/v0.1.2"
 };
 
-function start(state: CoreState, installUpdate: unknown = "nsis") {
+function start(state: CoreState, installUpdate: unknown = "nsis", updateInfo: unknown = newer) {
   mockCommands({
     core_status: { state: "running", version: "v0.1.1", restarts: 0 },
     take_pending_links: [],
     "GET /v1/state": state,
     "GET /v1/logs": { lines: [] },
-    "GET /v1/update": newer,
+    "GET /v1/update": updateInfo,
     autostart_status: false,
     install_update: installUpdate
   });
@@ -79,9 +79,36 @@ describe("automatic updates", () => {
     expect(localStorage.getItem("nyatunnel.autoUpdate")).toBe("on");
   });
 
-  it("leaves a system service alone", async () => {
-    start(enrolled({ service: { running: true, server: "https://old.example.net", deviceId: "dev_9", deviceName: "nas" } }));
+  it("waits while a system service still runs the app's own core", async () => {
+    start(enrolled({ service: { running: true, server: "https://old.example.net", deviceId: "dev_9", deviceName: "nas", sharesCore: true } }));
     expect(await screen.findByRole("button", { name: "设置 · 有新版本" })).toBeInTheDocument();
     expect(installs()).toBe(0);
+  });
+
+  it("still updates the app when the service has its own copy", async () => {
+    start(enrolled({ service: { running: true, server: "https://old.example.net", deviceId: "dev_9", deviceName: "nas" } }));
+    expect(await screen.findByTestId("installing")).toBeInTheDocument();
+    expect(installs()).toBe(1);
+  });
+
+  it("reports a rolled-back update and does not retry that version for a day", async () => {
+    const at = new Date(Date.now() - 60_000).toISOString();
+    start(enrolled(), "nsis", {
+      ...newer,
+      lastAttempt: { from: "0.1.1", to: "0.1.2", ok: false, rolledBack: true, error: "新版本 0.1.2 在 2m0s 内没有启动", at }
+    });
+    const banner = await screen.findByTestId("update-rolled-back");
+    expect(banner).toHaveTextContent("已恢复为 0.1.1");
+    expect(installs()).toBe(0);
+    await userEvent.setup().click(screen.getByRole("button", { name: "知道了" }));
+    await waitFor(() => expect(screen.queryByTestId("update-rolled-back")).toBeNull());
+    expect(localStorage.getItem("nyatunnel.updateResultSeen")).toBe(at);
+  });
+
+  it("says so once after an unattended update", async () => {
+    const at = new Date(Date.now() - 60_000).toISOString();
+    start(enrolled(), "nsis", { current: "0.1.2", latest: "0.1.2", newer: false, url: "", lastAttempt: { from: "0.1.1", to: "0.1.2", ok: true, at } });
+    expect(await screen.findByText("已自动更新到 0.1.2")).toBeInTheDocument();
+    expect(localStorage.getItem("nyatunnel.updateResultSeen")).toBe(at);
   });
 });

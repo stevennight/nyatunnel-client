@@ -114,7 +114,7 @@ export function SettingsPage(props: {
           自动下载并安装新版本
         </label>
         <div className="hint" style={{ marginBottom: 10 }}>
-          每 6 小时检查一次。安装包会先核对发布页的 SHA256 校验和；Windows 上直接覆盖安装并重启，隧道会短暂断开。
+          每 6 小时检查一次。安装包会先核对发布页的 SHA256 校验和；Windows 上在后台静默安装并自动重启，隧道会短暂断开。新版本没有启动或没能重新连上服务器时，会自动恢复旧版本。
         </div>
       </div>
       <div className="fs">

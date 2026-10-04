@@ -96,7 +96,8 @@ fn autostart_set(app: AppHandle, enabled: bool) -> Result<bool, String> {
 }
 
 /// Downloads (through the core, which verifies SHA256SUMS) and installs the latest release.
-/// Windows: the passive installer replaces this app and restarts it, so the app exits here.
+/// Windows: a detached updater installs silently, restarts the app and rolls back on failure
+/// (see `update::launch_updater`), so the app exits here.
 /// Linux AppImage: the file is swapped and the new version started. Otherwise (dmg, deb) the
 /// package is opened for the user. Returns the installer kind.
 #[tauri::command]
@@ -116,19 +117,31 @@ async fn install_update(app: AppHandle, core: State<'_, Arc<Core>>) -> Result<St
         .unwrap_or_default()
         .to_string();
     let path = info.get("path").and_then(Value::as_str).unwrap_or_default();
+    let to = info
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let from = app.package_info().version.to_string();
     let installer =
         update::validate(path, &kind).map_err(|e| CoreError::new("update_invalid", e))?;
     match kind.as_str() {
-        "nsis" | "appimage" => {
+        "nsis" => {
+            // The updater waits for this process to exit, so it is started before the core stops:
+            // if it cannot start, nothing has been interrupted.
+            if let Err(e) = update::launch_updater(&installer, &from, &to) {
+                sidecar::log::warn(&e);
+                return Err(CoreError::new("update_failed", e));
+            }
+            let supervisor = core.inner().clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || supervisor.shutdown()).await;
+            app.exit(0);
+        }
+        "appimage" => {
             // Stop the core first so its executable can be replaced.
             let supervisor = core.inner().clone();
             let _ = tauri::async_runtime::spawn_blocking(move || supervisor.shutdown()).await;
-            let started = if kind == "nsis" {
-                update::run_nsis(&installer)
-            } else {
-                update::replace_appimage(&installer)
-            };
-            if let Err(e) = started {
+            if let Err(e) = update::replace_appimage(&installer) {
                 sidecar::log::warn(&e);
                 return Err(CoreError::new("update_failed", e));
             }

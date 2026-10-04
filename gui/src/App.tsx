@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, autoUpdateEnabled, RELEASES_URL, type CoreState, type UpdateInfo } from "./api";
+import { api, autoUpdateEnabled, recentlyFailed, RELEASES_URL, type CoreState, type UpdateInfo } from "./api";
 import { EnrollDialog, type EnrollRequest } from "./components/EnrollDialog";
 import { useNotify } from "./components/ui";
 import { useCoreState, useCoreStatus, useDeepLinks, useLogs } from "./hooks";
@@ -27,6 +27,23 @@ export interface InstallState {
 }
 
 const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
+const SEEN_ATTEMPT_KEY = "nyatunnel.updateResultSeen";
+
+function seenAttempt(): string {
+  try {
+    return localStorage.getItem(SEEN_ATTEMPT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function markAttemptSeen(at: string) {
+  try {
+    localStorage.setItem(SEEN_ATTEMPT_KEY, at);
+  } catch {
+    // ignore: the notice just shows again next time
+  }
+}
 
 export function App() {
   const notify = useNotify();
@@ -38,6 +55,7 @@ export function App() {
   const [enroll, setEnroll] = useState<EnrollRequest | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [install, setInstall] = useState<InstallState | null>(null);
+  const [attemptSeen, setAttemptSeen] = useState(seenAttempt);
   const installing = useRef(false);
 
   const stateRef = useRef<CoreState | null>(state);
@@ -107,7 +125,8 @@ export function App() {
 
   // Quiet update checks at start and every 6 hours; failures are ignored here (设置 shows them on
   // demand). A newer release is installed right away unless the user turned that off, the build
-  // is a development one, or a system service runs the core (the installer could not replace it).
+  // is a development one, a system service still runs this app's own core (the installer could
+  // not replace it), or installing that version failed within the last day.
   const ready = running && state !== null;
   useEffect(() => {
     if (!ready) return;
@@ -115,7 +134,7 @@ export function App() {
       api.checkUpdate().then((u) => {
         setUpdate(u);
         const dev = import.meta.env.DEV || /dev/.test(u.current);
-        if (u.newer && autoUpdateEnabled() && !dev && !stateRef.current?.service?.running) {
+        if (u.newer && autoUpdateEnabled() && !dev && !stateRef.current?.service?.sharesCore && !recentlyFailed(u)) {
           void installUpdate(u.latest);
         }
       }, () => undefined);
@@ -123,6 +142,16 @@ export function App() {
     const t = setInterval(check, UPDATE_INTERVAL);
     return () => clearInterval(t);
   }, [ready, installUpdate]);
+
+  // Report the outcome of an unattended update once (the updater restarted us, or the old version).
+  const attempt = update?.lastAttempt;
+  useEffect(() => {
+    if (attempt?.ok && attempt.at !== attemptSeen && Date.now() - Date.parse(attempt.at) < 24 * 3600 * 1000) {
+      notify(`已自动更新到 ${attempt.to.replace(/^v/, "")}`, "ok");
+      markAttemptSeen(attempt.at);
+      setAttemptSeen(attempt.at);
+    }
+  }, [attempt, attemptSeen, notify]);
 
   // Leave pages that no longer apply.
   useEffect(() => {
@@ -156,6 +185,24 @@ export function App() {
           <span className="spacer">自动更新失败：{install.error}</span>
           <button className="btn sm" onClick={() => installUpdate(install.version)}>重试</button>
           <button className="btn sm" onClick={() => openExternal(update?.url || RELEASES_URL).catch(() => undefined)}>手动下载</button>
+        </div>
+      )}
+      {attempt && !attempt.ok && attempt.at !== attemptSeen && (
+        <div className="banner bad" role="alert" data-testid="update-rolled-back">
+          <span className="spacer">
+            自动更新到 {attempt.to.replace(/^v/, "")} 没有成功：{attempt.error || "原因未知"}。
+            {attempt.rolledBack ? `已恢复为 ${attempt.from.replace(/^v/, "")}，隧道照常运行。` : "请检查 NyaTunnel 是否正常运行。"}
+            一天内不会再自动重试。
+          </span>
+          <button
+            className="btn sm"
+            onClick={() => {
+              markAttemptSeen(attempt.at);
+              setAttemptSeen(attempt.at);
+            }}
+          >
+            知道了
+          </button>
         </div>
       )}
       {state?.notice && (
