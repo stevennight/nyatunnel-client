@@ -64,7 +64,7 @@ export function RequestPage(props: { canRequest: boolean; connected: boolean }) 
       <div className="row">
         <label className="l" htmlFor="rq-type">类型</label>
         <select id="rq-type" className="inp" value={form.type} onChange={(e) => set("type", e.target.value)}>
-          <option value="https">HTTPS 网站</option>
+          <option value="https">Web 网站（HTTP / HTTPS）</option>
           <option value="tcp">TCP</option>
           <option value="udp">UDP</option>
           <option value="tcpudp">TCP+UDP（同一端口）</option>

@@ -20,7 +20,9 @@ export function isValidPort(port: number): boolean {
 }
 
 export function typeLabel(type: string): string {
-  return type === "tcpudp" ? "TCP+UDP" : type.toUpperCase();
+  if (type === "https") return "Web";
+  if (type === "tcpudp") return "TCP+UDP";
+  return type.toUpperCase();
 }
 
 /** Whether the public address is something a browser can open. */
