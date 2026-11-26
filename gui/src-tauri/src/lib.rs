@@ -96,10 +96,10 @@ fn autostart_set(app: AppHandle, enabled: bool) -> Result<bool, String> {
 }
 
 /// Downloads (through the core, which verifies SHA256SUMS) and installs the latest release.
-/// Windows: a detached updater installs silently, restarts the app and rolls back on failure
-/// (see `update::launch_updater`), so the app exits here.
-/// Linux AppImage: the file is swapped and the new version started. Otherwise (dmg, deb) the
-/// package is opened for the user. Returns the installer kind.
+/// Windows / macOS (.app): a detached updater installs silently, restarts the app and rolls back
+/// on failure, so the app exits here.
+/// Linux AppImage: the file is swapped and the new version started. Otherwise (deb, or macOS when
+/// running outside a writable `.app`) the package is opened for the user. Returns the installer kind.
 #[tauri::command]
 async fn install_update(app: AppHandle, core: State<'_, Arc<Core>>) -> Result<String, CoreError> {
     let app_image = std::env::var_os("APPIMAGE").is_some();
@@ -137,6 +137,24 @@ async fn install_update(app: AppHandle, core: State<'_, Arc<Core>>) -> Result<St
             let _ = tauri::async_runtime::spawn_blocking(move || supervisor.shutdown()).await;
             app.exit(0);
         }
+        "dmg" => match update::launch_macos_updater(&installer, &from, &to) {
+            Ok(true) => {
+                let supervisor = core.inner().clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || supervisor.shutdown()).await;
+                app.exit(0);
+                return Ok("dmg-auto".into());
+            }
+            Ok(false) => {
+                use tauri_plugin_opener::OpenerExt;
+                app.opener()
+                    .open_path(installer.to_string_lossy(), None::<&str>)
+                    .map_err(|e| CoreError::new("update_failed", format!("无法打开安装包：{e}")))?;
+            }
+            Err(e) => {
+                sidecar::log::warn(&e);
+                return Err(CoreError::new("update_failed", e));
+            }
+        },
         "appimage" => {
             // Stop the core first so its executable can be replaced.
             let supervisor = core.inner().clone();

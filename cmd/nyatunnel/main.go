@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,8 +58,8 @@ const usage = `用法: nyatunnel <命令> [参数]
   service install            安装为系统服务（开机即运行，无需登录；需要管理员 / root）
   service uninstall [--purge] 卸载系统服务（--purge 同时删除服务使用的设备密钥）
   service status             查看系统服务状态
-  service auto-update on|off 系统服务是否自动安装新版本（默认开启，仅 Windows）
-  service update             立即把系统服务更新到最新版本（失败自动恢复，仅 Windows）
+  service auto-update on|off 系统服务是否自动安装新版本（默认开启，Windows / macOS）
+  service update             立即把系统服务更新到最新版本（失败自动恢复，Windows / macOS）
   update [--check]           检查并安装新版本（从 GitHub Releases 下载并校验 SHA256SUMS）
   version                    显示版本
 
@@ -869,6 +870,11 @@ func runAsService(stderr io.Writer) int {
 	if err != nil {
 		log.Error("service", "err", err)
 		return 1
+	}
+	// On macOS, launchd's KeepAlive.SuccessfulExit=false restarts on any non-zero exit code.
+	// Return 0 when the device was revoked (code 3) so launchd does not respawn it forever.
+	if code == 3 && runtime.GOOS == "darwin" {
+		return 0
 	}
 	return code
 }

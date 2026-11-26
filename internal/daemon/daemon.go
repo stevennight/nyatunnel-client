@@ -393,7 +393,7 @@ func (d *Daemon) DownloadUpdate(ctx context.Context, appImage bool) (*Downloaded
 		return nil, errors.New("已是最新版本")
 	}
 	if info, err := service.ReadInfo(); err == nil && serviceSharesCore(info) {
-		return nil, errors.New("系统服务正在使用本程序目录中的 nyatunnel.exe（较早的安装方式），暂时无法更新界面。请用新版 CLI 以管理员身份运行一次 `nyatunnel service update`，服务会迁到自己的目录，之后界面即可正常更新")
+		return nil, errors.New("系统服务正在使用本程序目录中的核心程序（较早的安装方式），暂时无法更新界面。请用新版 CLI 以管理员 / root 身份运行一次 `nyatunnel service update`，服务会迁到自己的目录，之后界面即可正常更新")
 	}
 	path, kind, err := update.DownloadGUI(ctx, r, appImage)
 	if err != nil {
